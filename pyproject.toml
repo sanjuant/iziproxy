@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iziproxy"
+version = "0.3.0"
+description = "Une bibliothèque Python pour la gestion simplifiée des proxys d'entreprise"
+readme = "README.md"
+authors = [
+    {name = "sanjuant"}
+]
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["proxy", "enterprise", "authentication", "ntlm", "requests", "configuration", "development",  "pac"]
+dependencies = [
+    "requests>=2.25.0",
+    "PyYAML>=6.0",
+    "keyring>=23.0.0",
+    "cryptography>=36.0.0",
+    "importlib_metadata>=4.0.0; python_version < '3.8'",
+]
+requires-python = ">=3.7"
+
+[project.optional-dependencies]
+ntlm = [
+    "ntlm-auth>=1.5.0",
+    "pycryptodomex>=3.14.1",
+]
+dev = [
+    "pytest>=6.0.0",
+    "pytest-cov>=2.12.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+    "sphinx>=4.0.0",
+    "sphinx-rtd-theme>=1.0.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/sanjuant/iziproxy"
+"Bug Tracker" = "https://github.com/sanjuant/iziproxy/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+
+[tool.black]
+line-length = 88
+target-version = ['py37', 'py38', 'py39', 'py310']

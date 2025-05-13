@@ -1,0 +1,56 @@
+# Exemple de configuration IziProxy
+
+# Configuration des environnements
+environments:
+  local:
+    proxy_url: null  # Pas de proxy pour l'environnement local
+    requires_auth: false
+  
+  dev:
+    proxy_url: "http://dev-proxy.example.com:8080"
+    requires_auth: true
+    auth_type: "basic"  # Authentification basique
+  
+  prod:
+    proxy_url: "http://prod-proxy.example.com:8080"
+    requires_auth: true
+    auth_type: "ntlm"  # Authentification NTLM (nécessite le module ntlm_auth)
+
+# Configuration de la section credentials
+credentials:
+  # Cette section est maintenant simplifiée puisque les identifiants sont :
+  # - Recherchés dans variables d'environnement (IZI_USERNAME, IZI_PASSWORD, IZI_DOMAIN)
+  # - Recherchés dans le fichier .env
+  # - Stockés automatiquement dans le trousseau système (keyring)
+  # - Demandés interactivement si nécessaire
+
+# Note: Les identifiants (username, password, domain) doivent être configurés via:
+#  - variables d'environnement: IZI_USERNAME, IZI_PASSWORD, IZI_DOMAIN
+#  - ou fichier .env
+
+# Configuration de la détection d'environnement
+environment_detection:
+  method: "auto"  # auto, env_var, hostname, ip, ask
+  
+  # Patterns pour la détection par nom d'hôte
+  hostname_patterns:
+    local: ["local", "laptop", "desktop", "dev-pc"]
+    dev: ["dev", "staging", "test", "preprod"]
+    prod: ["prod", "production"]
+  
+  # Expressions régulières pour la détection par nom d'hôte
+  hostname_regex:
+    local: ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"]
+    dev: ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"]
+    prod: ["^prod\\d*-", "^production\\d*-"]
+  
+  # Plages IP pour la détection par adresse IP
+  ip_ranges:
+    local: ["192.168.0.0/24", "127.0.0.1-127.0.0.255"]
+    dev: ["10.0.0.0/16"]
+    prod: ["172.16.0.0/16"]
+
+# Configuration de la détection de proxy système
+system_proxy:
+  use_system_proxy: true  # Utiliser le proxy système si pas de proxy explicite
+  detect_pac: true  # Détecter et utiliser les fichiers PAC
