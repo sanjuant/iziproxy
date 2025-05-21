@@ -10,7 +10,7 @@ Documentation d'IziProxy
    :alt: Python versions
 
 .. image:: https://img.shields.io/github/license/votrenom/iziproxy.svg
-   :target: https://github.com/votrenom/iziproxy/blob/main/LICENSE
+   :target: https://github.com/sanjuant/iziproxy/blob/main/LICENSE
    :alt: License
 
 Une bibliothèque Python pour la gestion simplifiée des proxys d'entreprise.
