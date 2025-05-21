@@ -3,23 +3,18 @@
 # Configuration des environnements
 environments:
   local:
-    proxy_url: null  # Pas de proxy pour l'environnement local
-    requires_auth: false
-  
+    proxy_url: "http://proxy.example.com:8080"
+    requires_auth: true
+    auth_type: "ntlm"                     # Authentification NTLM en local (poste Windows)
+
   dev:
     proxy_url: "http://dev-proxy.example.com:8080"
     requires_auth: true
-    auth_type: "basic"  # Authentification basique
-  
+    auth_type: "basic"                    # Authentification basique
+
   prod:
     proxy_url: "http://prod-proxy.example.com:8080"
-    requires_auth: true
-    auth_type: "ntlm"  # Authentification NTLM (nécessite le module ntlm_auth)
-
-# Note: Les identifiants (username, password, domain) ne sont jamais stockés dans un fichier de configuration
-# Ils doivent être configurés via :
-#  - variables d'environnement: IZI_USERNAME, IZI_PASSWORD, IZI_DOMAIN
-#  - ou fichier .env
+    requires_auth: false
 
 # Configuration de la détection d'environnement
 environment_detection:

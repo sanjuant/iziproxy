@@ -59,11 +59,6 @@ def ntlm_example():
                 "requires_auth": True,
                 "auth_type": "ntlm"
             }
-        },
-        "credentials": {
-            "username": username,
-            "password": password,
-            "domain": domain
         }
     }
     
