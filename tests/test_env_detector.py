@@ -2,12 +2,9 @@
 Tests unitaires pour le module env_detector
 """
 
-import unittest
 import os
-import socket
-import platform
-import re
-from unittest.mock import patch, MagicMock, PropertyMock
+import unittest
+from unittest.mock import patch
 
 from iziproxy.env_detector import EnvironmentDetector
 

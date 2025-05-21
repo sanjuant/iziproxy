@@ -2,15 +2,14 @@
 Module de détection automatique des proxys système et des fichiers PAC
 """
 
-import os
-import re
-import sys
 import logging
+import os
+import platform
+import re
 import socket
+import ssl
 import urllib.request
 from urllib.parse import urlparse
-import ssl
-import platform
 
 # Configuration du logger
 logger = logging.getLogger("iziproxy")
@@ -95,16 +94,37 @@ class ProxyDetector:
         if self.detect_pac:
             methods.append(self._detect_pac_file)
 
+        # On a besoin de savoir si on a trouvé un proxy HTTP/HTTPS pour éviter
+        # de continuer inutilement
+        found_proxy = False
+
         # Essayer chaque méthode
         for method in methods:
             try:
+                method_name = getattr(method, '__name__', str(method))
                 proxy_config = method(url)
+
                 if proxy_config:
                     result.update(proxy_config)
-                    logger.debug(f"Proxy détecté via {method.__name__}: {proxy_config}")
-                    break
+                    logger.debug(f"Proxy détecté via {method_name}: {proxy_config}")
+
+                    # Vérifier si on a trouvé un proxy HTTP/HTTPS
+                    if 'http' in proxy_config or 'https' in proxy_config:
+                        found_proxy = True
+                        break
             except Exception as e:
-                logger.debug(f"Erreur lors de la détection via {method.__name__}: {e}")
+                method_name = getattr(method, '__name__', str(method))
+                logger.debug(f"Erreur lors de la détection via {method_name}: {e}")
+
+        # Si on n'a pas trouvé de proxy mais qu'on a une URL PAC, essayer de la traiter
+        if not found_proxy and not result.get('http') and not result.get('https') and result.get('pac_url'):
+            try:
+                pac_result = self._detect_pac_file(url)
+                if pac_result:
+                    result.update(pac_result)
+                    logger.debug(f"Proxy détecté via PAC: {pac_result}")
+            except Exception as e:
+                logger.debug(f"Erreur lors de la détection via PAC: {e}")
 
         # Mettre en cache
         self._detection_cache[cache_key] = result

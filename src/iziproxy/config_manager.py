@@ -2,16 +2,17 @@
 Module de gestion de la configuration d'IziProxy
 """
 
-import os
-import yaml
-import logging
-import keyring
 import getpass
-import socket
+import logging
+import os
 import platform
+import socket
+
+import keyring
+import yaml
+
 sys_platform = platform.system().lower()
 from pathlib import Path
-import re
 
 from .secure_config import SecurePassword
 
@@ -97,7 +98,7 @@ class ConfigManager:
                 username = os.environ.get('USER')
         
         # Détection du domaine (spécifique à Windows pour le domaine AD)
-        if sys_platform == 'windows':
+        if platform.system() == "Windows":
             # Récupérer le domaine Windows
             domain = os.environ.get('USERDOMAIN')
             
@@ -110,15 +111,21 @@ class ConfigManager:
             # Alternative: extraire le domaine du nom d'utilisateur au format domain\username
             if not domain and username and '\\' in username:
                 domain, username = username.split('\\', 1)
-        else:
-            # Pour Unix/Linux/Mac, essayer de récupérer le domaine DNS
+        else:  # Unix/Linux/MacOS
+            # Récupération du nom d'utilisateur
+            username = os.environ.get("USER")
+
+            # Extraction du domaine à partir du FQDN
             try:
                 fqdn = socket.getfqdn()
-                if '.' in fqdn:
-                    # Extraire le domaine du FQDN (apres le premier point)
-                    domain = fqdn.split('.', 1)[1]
-            except Exception as e:
-                logger.debug(f"Erreur lors de la détection du domaine: {e}")
+                # Diviser le FQDN en parties (hostname.example.com -> ["hostname", "example", "com"])
+                parts = fqdn.split('.')
+                if len(parts) > 1:
+                    # Joindre toutes les parties sauf la première pour former le domaine
+                    domain = '.'.join(parts[1:])
+            except Exception:
+                # En cas d'erreur, laisser le domaine à None
+                pass
         
         logger.debug(f"Informations de session détectées - Utilisateur: {username}, Domaine: {domain}")
         return username, domain
@@ -196,10 +203,6 @@ class ConfigManager:
                 },
                 "ip_ranges": {}
             },
-            "credentials": {
-                # Les identifiants doivent être définis via variables d'environnement ou .env
-                # L'authentification est gérée par keyring et la saisie interactive si nécessaire
-            },
             "system_proxy": {
                 "use_system_proxy": True,
                 "detect_pac": True
@@ -229,23 +232,7 @@ class ConfigManager:
             return self.config["environments"][env_type]
         return {}
 
-    def _get_credentials_from_config(self, cred_config, domain):
-        """
-        Récupère les identifiants depuis la configuration YAML
-        Cette méthode est conservée pour compatibilité mais ne fait plus rien
-        car les identifiants doivent être stockés dans des variables d'environnement ou .env
-        
-        Args:
-            cred_config (dict): Configuration des identifiants
-            domain (str): Domaine actuel
-            
-        Returns:
-            tuple: (username, password, domain)
-        """
-        # Les identifiants ne doivent plus être stockés dans la config YAML
-        # Cette méthode est conservée pour compatibilité
-        return None, None, domain
-        
+
     def _load_dotenv(self):
         """
         Charge les variables d'environnement depuis un fichier .env
@@ -283,9 +270,9 @@ class ConfigManager:
         Récupère les identifiants depuis les variables d'environnement et le fichier .env
         
         Args:
-            username (str): Nom d'utilisateur actuel ou None
-            password (str): Mot de passe actuel ou None
-            domain (str): Domaine actuel ou None
+            username (str|None): Nom d'utilisateur actuel ou None
+            password (str|None): Mot de passe actuel ou None
+            domain (str|None): Domaine actuel ou None
             
         Returns:
             tuple: (username, password, domain)
@@ -432,9 +419,9 @@ class ConfigManager:
         Demande les identifiants manquants interactivement
         
         Args:
-            username (str): Nom d'utilisateur actuel ou None
-            password (str): Mot de passe actuel ou None
-            domain (str): Domaine actuel ou None
+            username (str|None): Nom d'utilisateur actuel ou None
+            password (str|None): Mot de passe actuel ou None
+            domain (str|None): Domaine actuel ou None
             keyring_service (str): Nom du service keyring pour le mot de passe
             username_key (str): Clé pour stocker le nom d'utilisateur
             service_name (str): Nom du service
@@ -494,15 +481,15 @@ class ConfigManager:
             logger.debug(f"Identifiants stockés dans keyring pour {username}")
         except Exception as e:
             logger.debug(f"Impossible de stocker les identifiants dans keyring: {e}")
-            
-    def get_credentials(self, env_type, service_name="iziproxy"):
+
+    def get_credentials(self, env_type, service_name="proxyninja"):
         """
         Obtient les identifiants pour un environnement donné
-        
+
         Args:
-            env_type (str): Type d'environnement
-            service_name (str, optional): Nom du service pour le stockage des identifiants
-            
+            env_type: Type d'environnement
+            service_name: Nom du service pour le stockage des identifiants
+
         Returns:
             tuple: (username, password, domain)
         """
@@ -510,51 +497,51 @@ class ConfigManager:
         env_config = self.get_environment_config(env_type)
         if not env_config.get("requires_auth", False):
             return None, None, None
+        else:
+            auth_type = env_config.get("auth_type", "basic")
 
-        # Obtenir le type d'authentification
-        auth_type = env_config.get("auth_type", "basic")
-        
-        # Initialiser le domaine
-        domain = ""
-        
-        # Définir les noms des clés pour keyring
-        keyring_service = f"{service_name}_{env_type}-{auth_type}"
-        username_key = f"{service_name}_{env_type}-username"
-        
-        # Ordre de priorité pour les identifiants
-        username, password, domain = self._get_credentials_from_config({}, domain)
-        if username and password:
-            return username, password, domain
-            
+        # Initialisation des variables
+        username = None
+        password = None
+        domain = None
+        store_method = "keyring"  # Valeur par défaut
+        prompt_on_missing = True  # Valeur par défaut
+
+        # Variables d'environnement - Priorité 1
         username, password, domain = self._get_credentials_from_env_vars(username, password, domain)
+
+        # Si les identifiants sont complets, les retourner
         if username and password:
-            return username, password, domain
-            
-        username, password, domain = self._get_credentials_from_keyring(
-            username, password, domain, 
-            keyring_service, username_key, 
-            service_name
-        )
+            return username, SecurePassword(password), domain
+
+        # Keyring - Priorité 2
+        if store_method == "keyring":
+            keyring_service = f"{service_name}_{env_type}-{auth_type}"
+            username_key = "username"
+            username, password, domain = self._get_credentials_from_keyring(
+                username, password, domain, keyring_service, username_key, service_name)
+
+        # Si les identifiants sont complets, les retourner
         if username and password:
-            return username, password, domain
-            
+            return username, SecurePassword(password), domain
+
+        # Session en cours - Priorité 3
         username, password, domain = self._get_credentials_from_session(
-            username, password, domain, 
-            keyring_service,
-            auth_type
-        )
+            username, password, domain, f"{service_name}_{env_type}-{auth_type}", auth_type)
+
+        # Si les identifiants sont complets, les retourner
         if username and password:
+            return username, SecurePassword(password), domain
+
+        # Demande interactive - Priorité 4 (seulement si prompt_on_missing est True)
+        if prompt_on_missing:
+            keyring_service = f"{service_name}_{env_type}-{auth_type}"
+            username_key = "username"
+            username, password, domain = self._get_credentials_interactively(
+                username, password, domain, keyring_service, username_key, service_name, auth_type)
+
+        # Retourner les identifiants (complets ou non)
+        if username and password:
+            return username, SecurePassword(password), domain
+        else:
             return username, password, domain
-            
-        # Demande interactive en dernier recours (toujours activée)
-        username, password, domain = self._get_credentials_interactively(
-            username, password, domain, 
-            keyring_service, username_key, service_name,
-            auth_type
-        )
-        
-        # Sécuriser le mot de passe avant de le retourner
-        if password and not isinstance(password, SecurePassword):
-            password = SecurePassword(password)
-            
-        return username, password, domain

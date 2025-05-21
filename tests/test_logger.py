@@ -2,11 +2,11 @@
 Tests unitaires pour le module logger
 """
 
-import unittest
-from unittest.mock import patch, MagicMock
-import logging
 import io
+import logging
 import sys
+import unittest
+from unittest.mock import patch
 
 from iziproxy.logger import get_logger
 

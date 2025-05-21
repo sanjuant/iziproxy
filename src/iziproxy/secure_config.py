@@ -3,7 +3,7 @@ Module de gestion sécurisée des mots de passe et des configurations de proxy
 """
 
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, quote
 
 from cryptography.fernet import Fernet
 
@@ -26,6 +26,9 @@ class SecurePassword:
         Args:
             password (str): Le mot de passe en clair à sécuriser
         """
+        self._SecurePassword__encrypted_password = None
+        self._SecurePassword__cipher = None
+        self._SecurePassword__key = None
         if isinstance(password, SecurePassword):
             # Si on passe déjà un SecurePassword, on récupère ses attributs
             self.__key = password._SecurePassword__key
@@ -75,10 +78,16 @@ class SecureProxyConfig(dict):
                                         (ex: {'http': 'http://user:pass@proxy:8080'})
         """
         super().__init__()
+        self._secure_passwords = {}  # Pour stocker les mots de passe sécurisés
+
         if proxy_dict:
             # Remplace les mots de passe dans les URLs par des objets SecurePassword
             for key, url in proxy_dict.items():
-                self[key] = self._secure_url(url)
+                secured_url, secure_password = self._secure_url(url)
+                self[key] = secured_url
+                if secure_password:
+                    # Stocker les mots de passe sécurisés séparément
+                    self._secure_passwords[(key, url)] = secure_password
 
     def __str__(self):
         """Masque les mots de passe dans la représentation string."""
@@ -88,43 +97,92 @@ class SecureProxyConfig(dict):
         """Masque les mots de passe dans la représentation repr."""
         return f"SecureProxyConfig({self._mask_passwords(dict(self))})"
 
+    def _parse_url_with_auth(self, url):
+        """
+        Parse une URL en gérant correctement les caractères spéciaux dans le mot de passe,
+        y compris lorsque le mot de passe contient '@' ou ':'.
+
+        Cette méthode ne se fie pas à urlparse qui s'arrête au premier '@',
+        mais utilise une approche plus robuste.
+
+        Args:
+            url (str): URL à analyser
+
+        Returns:
+            tuple: (scheme, username, password, host_with_path)
+        """
+        if not url or '@' not in url:
+            return None, None, None, url
+
+        # Récupérer le schéma (http, https, etc.)
+        match = re.match(r'^([a-z]+)://(.*)', url)
+        if not match:
+            return None, None, None, url
+
+        scheme = match.group(1)
+        remainder = match.group(2)
+
+        # Trouver le dernier '@' qui sépare les identifiants du reste de l'URL
+        last_at_index = remainder.rindex('@')
+        auth_part = remainder[:last_at_index]
+        host_with_path = remainder[last_at_index + 1:]
+
+        # Trouver le premier ':' qui sépare le username du password
+        first_colon_index = auth_part.find(':')
+
+        if first_colon_index == -1:
+            # Pas de mot de passe, juste un nom d'utilisateur
+            return scheme, auth_part, None, host_with_path
+
+        # Extraire le nom d'utilisateur et le mot de passe
+        username = auth_part[:first_colon_index]
+        password = auth_part[first_colon_index + 1:]
+
+        # Décoder le mot de passe encodé s'il y en a un
+        try:
+            password = unquote(password)
+        except Exception:
+            # Si le décodage échoue, garder le mot de passe tel quel
+            pass
+
+        return scheme, username, password, host_with_path
+
     def _secure_url(self, url):
         """
-        Convertit les mots de passe dans les URLs en objets SecurePassword
-        
+        Convertit les mots de passe dans les URLs en objets SecurePassword.
+        Gère correctement les mots de passe contenant des caractères spéciaux comme '@' ou ':'.
+
         Args:
             url (str): URL de proxy, potentiellement avec authentification
-            
+
         Returns:
-            str: URL avec le mot de passe remplacé par un objet SecurePassword
+            tuple: (URL avec mot de passe masqué, objet SecurePassword ou None)
         """
-        if not url or not isinstance(url, str) or '@' not in url:
-            return url
+        if not url or not isinstance(url, str):
+            return url, None
 
-        parsed = urlparse(url)
-        if '@' not in parsed.netloc:
-            return url
-            
-        auth_part, server_part = parsed.netloc.split('@', 1)
+        # Utiliser notre parser personnalisé au lieu de urlparse
+        scheme, username, password, host_with_path = self._parse_url_with_auth(url)
 
-        if ':' in auth_part:
-            username, password = auth_part.split(':', 1)
-            secure_password = SecurePassword(password)
-            # Reconstruire l'URL avec le mot de passe sécurisé
-            secure_netloc = f"{username}:{secure_password}@{server_part}"
-            secure_parts = parsed._replace(netloc=secure_netloc)
-            return urlunparse(secure_parts)
+        if not username or not password:
+            return url, None
 
-        return url
+        # Créer un objet SecurePassword pour le mot de passe
+        secure_password = SecurePassword(password)
+
+        # Reconstruire l'URL avec le mot de passe masqué
+        masked_url = f"{scheme}://{username}:***********@{host_with_path}"
+
+        return masked_url, secure_password
 
     @staticmethod
     def _mask_passwords(obj):
         """
         Masque les mots de passe dans les objets pour l'affichage
-        
+
         Args:
             obj: Objet à masquer (dict ou str)
-            
+
         Returns:
             Objet avec mots de passe masqués
         """
@@ -138,86 +196,118 @@ class SecureProxyConfig(dict):
     @staticmethod
     def _mask_url_password(url):
         """
-        Masque les mots de passe dans les URLs pour l'affichage
-        
+        Masque les mots de passe dans les URLs pour l'affichage.
+        Gère correctement les cas où le mot de passe contient des caractères spéciaux.
+
         Args:
             url (str): URL à masquer
-            
+
         Returns:
             str: URL avec mot de passe masqué
         """
-        if not url or not isinstance(url, str):
+        if not url or not isinstance(url, str) or '@' not in url:
             return url
 
-        if '@' not in url:
+        # Trouver le schéma (http://, https://, etc.)
+        match = re.match(r'^([a-z]+)://(.*)', url)
+        if not match:
             return url
 
-        return re.sub(r'(https?://[^:]+:)([^@]+)(@[^/]+)', r'\1***********\3', url)
+        scheme = match.group(1)
+        remainder = match.group(2)
+
+        # Trouver le dernier '@' qui sépare les identifiants du reste de l'URL
+        try:
+            last_at_index = remainder.rindex('@')
+        except ValueError:
+            return url
+
+        auth_part = remainder[:last_at_index]
+        host_with_path = remainder[last_at_index + 1:]
+
+        # Trouver le premier ':' qui sépare le username du password
+        first_colon_index = auth_part.find(':')
+
+        if first_colon_index == -1:
+            return url
+
+        # Masquer le mot de passe
+        username = auth_part[:first_colon_index]
+        masked_url = f"{scheme}://{username}:***********@{host_with_path}"
+
+        return masked_url
 
     def get_real_config(self):
         """
         Retourne la configuration réelle (non masquée) à utiliser dans les requêtes
-        
+
         Returns:
-            dict: Configuration de proxy avec mots de passe en clair
+            dict: Configuration de proxy avec mots de passe en clair et encodés
         """
         real_config = {}
+
         for key, url in self.items():
-            if not url or '@' not in url:
-                real_config[key] = url
-                continue
-
-            parsed = urlparse(url)
-            if '@' not in parsed.netloc:
-                real_config[key] = url
-                continue
-                
-            auth_part, server_part = parsed.netloc.split('@', 1)
-
-            if ':' in auth_part:
-                username, password_obj = auth_part.split(':', 1)
-                
-                # Si le mot de passe est un SecurePassword, récupérer sa valeur réelle
-                if isinstance(password_obj, SecurePassword):
-                    password = password_obj.get_password()
-                    netloc = f"{username}:{password}@{server_part}"
-                    real_url = urlunparse(parsed._replace(netloc=netloc))
-                    real_config[key] = real_url
-                else:
+            try:
+                if not url:
                     real_config[key] = url
-            else:
+                    continue
+
+                # Utiliser notre parser personnalisé au lieu de urlparse
+                scheme, username, _, host_with_path = self._parse_url_with_auth(url)
+
+                if not username:
+                    # Pas d'authentification dans l'URL
+                    real_config[key] = url
+                    continue
+
+                # Chercher s'il existe un mot de passe sécurisé pour cette clé
+                secure_password = None
+                for (stored_key, _), stored_password in self._secure_passwords.items():
+                    if key == stored_key:
+                        secure_password = stored_password
+                        break
+
+                if secure_password:
+                    # Récupérer le mot de passe en clair
+                    password = secure_password.get_password()
+                    # Encoder les caractères spéciaux du mot de passe pour l'URL
+                    encoded_password = quote(password, safe='')
+                    # Reconstruire l'URL avec le mot de passe encodé
+                    real_config[key] = f"{scheme}://{username}:{encoded_password}@{host_with_path}"
+                else:
+                    # Pas de mot de passe sécurisé trouvé, utiliser l'URL telle quelle
+                    real_config[key] = url
+            except Exception as e:
+                # En cas d'erreur, utiliser l'URL telle quelle
                 real_config[key] = url
 
         return real_config
 
     def get_credentials(self, proxy_type='http'):
         """
-        Récupère les identifiants (username, password) pour un type de proxy
-        
+        Récupère les identifiants (username, SecurePassword) pour un type de proxy
+
         Args:
             proxy_type (str): Type de proxy ('http', 'https', etc.)
-            
+
         Returns:
-            tuple: (username, password) ou (None, None) si pas d'authentification
+            tuple: (username, SecurePassword) ou (None, None) si pas d'authentification
         """
         url = self.get(proxy_type)
-        if not url or '@' not in url:
+        if not url:
             return None, None
 
-        parsed = urlparse(url)
-        if '@' not in parsed.netloc:
+        # Utiliser notre parser personnalisé
+        _, username, _, _ = self._parse_url_with_auth(url)
+
+        if not username:
             return None, None
-            
-        auth_part, _ = parsed.netloc.split('@', 1)
 
-        if ':' in auth_part:
-            username, password_obj = auth_part.split(':', 1)
-            
-            if isinstance(password_obj, SecurePassword):
-                password = password_obj.get_password()
-            else:
-                password = password_obj
-                
-            return username, password
+        # Chercher s'il existe un mot de passe sécurisé pour ce type de proxy
+        secure_password = None
+        for (stored_key, _), stored_password in self._secure_passwords.items():
+            if proxy_type == stored_key:
+                secure_password = stored_password
+                break
 
-        return auth_part, None
+        return username, secure_password

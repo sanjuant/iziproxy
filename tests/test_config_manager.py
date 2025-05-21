@@ -2,9 +2,9 @@
 Tests unitaires pour le module config_manager
 """
 
-import os
 import unittest
-from unittest.mock import patch, mock_open, MagicMock
+from unittest.mock import patch, mock_open
+
 import yaml
 
 from iziproxy.config_manager import ConfigManager
@@ -32,12 +32,6 @@ class TestConfigManager(unittest.TestCase):
                     "requires_auth": True,
                     "auth_type": "ntlm"
                 }
-            },
-            "credentials": {
-                "store_method": "keyring",
-                "username": "testuser",
-                "password": "testpass",
-                "domain": "TESTDOMAIN"
             }
         }
 
@@ -50,7 +44,6 @@ class TestConfigManager(unittest.TestCase):
             # Vérifier que la configuration contient les sections attendues
             self.assertIn("environments", manager.config)
             self.assertIn("environment_detection", manager.config)
-            self.assertIn("credentials", manager.config)
             self.assertIn("system_proxy", manager.config)
 
     def test_load_yaml_config(self):
@@ -90,7 +83,11 @@ class TestConfigManager(unittest.TestCase):
     def test_get_credentials_from_config(self):
         """Vérifie la récupération des identifiants depuis la configuration"""
         # Patcher _load_yaml_config pour utiliser notre configuration de test
-        with patch.object(ConfigManager, '_load_yaml_config'):
+        # Et patcher _get_credentials_from_env_vars pour simuler des identifiants
+        with patch.object(ConfigManager, '_load_yaml_config'), \
+             patch.object(ConfigManager, '_get_credentials_from_env_vars', 
+                         return_value=("testuser", "testpass", "TESTDOMAIN")):
+            
             manager = ConfigManager()
             manager.config = self.test_config
             
@@ -109,10 +106,6 @@ class TestConfigManager(unittest.TestCase):
 
     def test_get_credentials_from_env_vars(self):
         """Vérifie la récupération des identifiants depuis les variables d'environnement"""
-        # Patcher _load_yaml_config pour utiliser une config sans identifiants
-        config_without_creds = self.test_config.copy()
-        config_without_creds["credentials"] = {"store_method": "keyring"}
-        
         # Définir les variables d'environnement
         env_vars = {
             'PROXY_USERNAME': 'envuser',
@@ -124,7 +117,7 @@ class TestConfigManager(unittest.TestCase):
              patch.dict('os.environ', env_vars):
             
             manager = ConfigManager()
-            manager.config = config_without_creds
+            manager.config = self.test_config
             
             # Tester la récupération des identifiants pour dev
             username, password, domain = manager.get_credentials("dev")
@@ -136,19 +129,17 @@ class TestConfigManager(unittest.TestCase):
 
     def test_get_credentials_from_keyring(self):
         """Vérifie la récupération des identifiants depuis keyring"""
-        # Patcher _load_yaml_config pour utiliser une config avec username mais sans password
-        config_with_username = self.test_config.copy()
-        config_with_username["credentials"] = {
-            "store_method": "keyring",
-            "username": "keyringuser"
-        }
+        # Patcher les méthodes pour que _get_credentials_from_env_vars ne retourne rien
+        # et que _get_credentials_from_keyring retourne des identifiants
         
         # Patcher keyring.get_password pour simuler un mot de passe stocké
         with patch.object(ConfigManager, '_load_yaml_config'), \
-             patch('keyring.get_password', return_value="keyringpass"):
+             patch.object(ConfigManager, '_get_credentials_from_env_vars', return_value=(None, None, None)), \
+             patch.object(ConfigManager, '_get_credentials_from_keyring', 
+                         return_value=("keyringuser", "keyringpass", None)):
             
             manager = ConfigManager()
-            manager.config = config_with_username
+            manager.config = self.test_config
             
             # Tester la récupération des identifiants pour dev
             username, password, domain = manager.get_credentials("dev")

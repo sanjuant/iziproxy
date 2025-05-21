@@ -4,6 +4,7 @@ Tests unitaires pour le module secure_config
 
 import unittest
 from unittest.mock import patch, MagicMock
+from urllib.parse import quote
 
 from iziproxy.secure_config import SecurePassword, SecureProxyConfig
 
@@ -126,18 +127,19 @@ class TestSecureProxyConfig(unittest.TestCase):
         proxy_dict = {
             "http": "http://user:password@proxy.example.com:8080"
         }
-        
+
         config = SecureProxyConfig(proxy_dict)
-        
+
         # Tester get_credentials pour http
-        username, password = config.get_credentials("http")
+        username, secure_password = config.get_credentials("http")
         self.assertEqual(username, "user")
-        self.assertEqual(password, "password")
-        
+        self.assertIsInstance(secure_password, SecurePassword)
+        self.assertEqual(secure_password.get_password(), "password")
+
         # Tester pour un type non présent
-        username, password = config.get_credentials("ftp")
+        username, secure_password = config.get_credentials("ftp")
         self.assertIsNone(username)
-        self.assertIsNone(password)
+        self.assertIsNone(secure_password)
         
     def test_str_and_repr(self):
         """Vérifie que str() et repr() masquent correctement les mots de passe"""
@@ -159,19 +161,22 @@ class TestSecureProxyConfig(unittest.TestCase):
     
     def test_special_characters_in_password(self):
         """Vérifie que les caractères spéciaux dans les mots de passe sont gérés correctement"""
-        special_chars = "!@#$%^&*()_+-=[]{}|;:'\",.<>/?~`"
+        special_chars = "!@#$%^&*(testpass)_+-=[]{}|;:'\",.<>/?~`"
         proxy_url = f"http://user:{special_chars}@proxy.example.com:8080"
         
         config = SecureProxyConfig({"http": proxy_url})
         
         # Le mot de passe doit être récupérable tel quel
         username, password = config.get_credentials("http")
-        self.assertEqual(password, special_chars)
+        self.assertEqual(password.get_password(), special_chars)
         
-        # get_real_config() doit retourner l'URL avec le mot de passe original
+        # get_real_config() doit retourner l'URL avec le mot de passe encodé
         real_config = config.get_real_config()
-        self.assertEqual(real_config["http"], proxy_url)
-    
+
+        encoded_password = quote(special_chars, safe='')
+        expected_url = f"http://user:{encoded_password}@proxy.example.com:8080"
+        self.assertEqual(real_config["http"], expected_url)
+
     def test_multiple_proxy_types(self):
         """Vérifie que plusieurs types de proxy sont gérés correctement"""
         proxy_dict = {
@@ -180,25 +185,28 @@ class TestSecureProxyConfig(unittest.TestCase):
             "ftp": "http://user3:pass3@proxy3.example.com:2121",
             "no_proxy": "localhost,127.0.0.1"
         }
-        
+
         config = SecureProxyConfig(proxy_dict)
-        
+
         # Vérifier que tous les types sont présents
         self.assertEqual(len(config), 4)
-        
+
         # Vérifier que les identifiants peuvent être récupérés pour chaque type
-        username1, password1 = config.get_credentials("http")
+        username1, secure_password1 = config.get_credentials("http")
         self.assertEqual(username1, "user1")
-        self.assertEqual(password1, "pass1")
-        
-        username2, password2 = config.get_credentials("https")
+        self.assertIsInstance(secure_password1, SecurePassword)
+        self.assertEqual(secure_password1.get_password(), "pass1")
+
+        username2, secure_password2 = config.get_credentials("https")
         self.assertEqual(username2, "user2")
-        self.assertEqual(password2, "pass2")
-        
-        username3, password3 = config.get_credentials("ftp")
+        self.assertIsInstance(secure_password2, SecurePassword)
+        self.assertEqual(secure_password2.get_password(), "pass2")
+
+        username3, secure_password3 = config.get_credentials("ftp")
         self.assertEqual(username3, "user3")
-        self.assertEqual(password3, "pass3")
-    
+        self.assertIsInstance(secure_password3, SecurePassword)
+        self.assertEqual(secure_password3.get_password(), "pass3")
+
     def test_malformed_urls(self):
         """Vérifie que les URLs malformées sont gérées correctement"""
         malformed_urls = {
@@ -209,34 +217,36 @@ class TestSecureProxyConfig(unittest.TestCase):
             "empty": "",                                        # Chaîne vide
             "none": None                                         # None
         }
-        
+
         config = SecureProxyConfig(malformed_urls)
-        
+
         # Vérifier que toutes les URLs sont présentes
         self.assertEqual(len(config), 6)
-        
+
         # Vérifier que get_real_config() ne plante pas
         real_config = config.get_real_config()
         self.assertEqual(len(real_config), 6)
-        
+
         # Vérifier get_credentials pour chaque type
         # URL valide avec auth
-        username, password = config.get_credentials("valid")
+        username, secure_password = config.get_credentials("valid")
         self.assertEqual(username, "user")
-        self.assertEqual(password, "pass")
-        
+        self.assertIsInstance(secure_password, SecurePassword)
+        self.assertEqual(secure_password.get_password(), "pass")
+
         # URL avec username mais sans password
-        username, password = config.get_credentials("no_password")
+        username, secure_password = config.get_credentials("no_password")
         self.assertEqual(username, "user")
-        self.assertIsNone(password)
-        
+        self.assertIsNone(secure_password)
+
         # URL sans auth
-        username, password = config.get_credentials("no_auth")
+        username, secure_password = config.get_credentials("no_auth")
         self.assertIsNone(username)
-        self.assertIsNone(password)
-        
+        self.assertIsNone(secure_password)
+
         # Valeurs non URL
         for key in ["invalid", "empty", "none"]:
-            username, password = config.get_credentials(key)
+            username, secure_password = config.get_credentials(key)
             self.assertIsNone(username)
-            self.assertIsNone(password)
+            self.assertIsNone(secure_password)
+

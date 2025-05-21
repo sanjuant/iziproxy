@@ -2,13 +2,10 @@
 Tests unitaires pour le module proxy_detector
 """
 
-import unittest
 import os
-import sys
-import socket
-import ssl
-import urllib.request
-from unittest.mock import patch, MagicMock, PropertyMock, mock_open
+import unittest
+import urllib
+from unittest.mock import patch, MagicMock
 
 from iziproxy.proxy_detector import ProxyDetector
 
@@ -264,28 +261,35 @@ class TestProxyDetector(unittest.TestCase):
         
         # Devrait retourner None en cas d'erreur
         self.assertIsNone(pac_content)
-        
+
     @patch('sys.platform', 'win32')
     @patch('winreg.OpenKey')
     @patch('winreg.QueryValueEx')
     def test_detect_windows_proxy(self, mock_query_value, mock_open_key):
         """Vérifie la détection de proxy sur Windows"""
         # Cette fonction n'est testée que sur Windows, on simule donc l'environnement
-        import winreg
-        
+
         # Configurer les mocks pour simuler un proxy Windows
         mock_open_key.return_value = MagicMock()
-        
-        # Simuler un proxy activé
-        mock_query_value.side_effect = [
-            (1, 0),  # ProxyEnable = 1 (activé)
-            ('proxy.example.com:8080', 0),  # ProxyServer
-            ('localhost;127.0.0.1', 0)  # ProxyOverride
-        ]
-        
+
+        # Définir un comportement basé sur les arguments d'appel
+        def query_value_side_effect(key, value_name):
+            if value_name == 'ProxyEnable':
+                return (1, 0)  # Proxy activé
+            elif value_name == 'ProxyServer':
+                return ('proxy.example.com:8080', 0)  # Serveur proxy
+            elif value_name == 'ProxyOverride':
+                return ('localhost;127.0.0.1', 0)  # Exceptions
+            elif value_name == 'AutoConfigURL':
+                # Simuler l'absence de fichier PAC
+                raise FileNotFoundError()
+            return None
+
+        mock_query_value.side_effect = query_value_side_effect
+
         detector = ProxyDetector(self.config)
         result = detector._detect_windows_proxy()
-        
+
         # Vérifier que le proxy est correctement détecté
         self.assertEqual(result['http'], 'http://proxy.example.com:8080')
         self.assertEqual(result['https'], 'http://proxy.example.com:8080')
@@ -296,8 +300,7 @@ class TestProxyDetector(unittest.TestCase):
     @patch('winreg.QueryValueEx')
     def test_detect_windows_proxy_with_pac(self, mock_query_value, mock_open_key):
         """Vérifie la détection de fichier PAC sur Windows"""
-        import winreg
-        
+
         # Configurer les mocks pour simuler un fichier PAC Windows
         mock_open_key.return_value = MagicMock()
         
@@ -313,27 +316,34 @@ class TestProxyDetector(unittest.TestCase):
         # Vérifier que l'URL PAC est correctement détectée
         self.assertEqual(result['pac_url'], 'http://internal.example.com/proxy.pac')
         self.assertEqual(detector._pac_url, 'http://internal.example.com/proxy.pac')
-        
+
     @patch('sys.platform', 'win32')
     @patch('winreg.OpenKey')
     @patch('winreg.QueryValueEx')
     def test_detect_windows_proxy_per_protocol(self, mock_query_value, mock_open_key):
         """Vérifie la détection de proxy par protocole sur Windows"""
-        import winreg
-        
+
         # Configurer les mocks pour simuler un proxy Windows avec différentes adresses par protocole
         mock_open_key.return_value = MagicMock()
-        
-        # Simuler un proxy activé avec différentes adresses
-        mock_query_value.side_effect = [
-            (1, 0),  # ProxyEnable = 1 (activé)
-            ('http=proxy-http.example.com:8080;https=proxy-https.example.com:8443', 0),  # ProxyServer
-            ('localhost', 0)  # ProxyOverride
-        ]
-        
+
+        # Définir un comportement basé sur les arguments d'appel
+        def query_value_side_effect(key, value_name):
+            if value_name == 'ProxyEnable':
+                return (1, 0)  # Proxy activé
+            elif value_name == 'ProxyServer':
+                return ('http=proxy-http.example.com:8080;https=proxy-https.example.com:8443', 0)  # Serveur proxy par protocole
+            elif value_name == 'ProxyOverride':
+                return ('localhost', 0)  # Exceptions
+            elif value_name == 'AutoConfigURL':
+                # Simuler l'absence de fichier PAC
+                raise FileNotFoundError()
+            return None
+
+        mock_query_value.side_effect = query_value_side_effect
+
         detector = ProxyDetector(self.config)
         result = detector._detect_windows_proxy()
-        
+
         # Vérifier que les proxies par protocole sont correctement détectés
         self.assertEqual(result['http'], 'http://proxy-http.example.com:8080')
         self.assertEqual(result['https'], 'http://proxy-https.example.com:8443')
@@ -375,44 +385,42 @@ class TestProxyDetector(unittest.TestCase):
             # Détecter pour la seconde URL
             proxies2 = detector.detect_system_proxy('https://example.org')
             self.assertEqual(proxies2['http'], 'http://proxy2.example.com:8080')
-        
-    @unittest.skipIf(sys.platform != 'darwin', "Test spécifique à macOS")
+
+    @patch('sys.platform', 'darwin')
     @patch('subprocess.check_output')
     def test_detect_macos_proxy(self, mock_check_output):
         """Vérifie la détection de proxy sur macOS"""
-        # Configurer les mocks pour simuler un proxy macOS
+        # Reste du test inchangé
         mock_check_output.side_effect = [
-            "An asterisk (*) denotes that a network service is disabled.\nWi-Fi\nEthernet",  # networksetup -listallnetworkservices
-            "Enabled: Yes\nServer: proxy.example.com\nPort: 8080\nAuthenticated Proxy Enabled: 0",  # -getwebproxy
-            "Enabled: Yes\nServer: proxy-https.example.com\nPort: 8443\nAuthenticated Proxy Enabled: 0",  # -getsecurewebproxy
-            "Enabled: No"  # -getautoproxyurl
+            "An asterisk (*) denotes that a network service is disabled.\nWi-Fi\nEthernet",
+            "Enabled: Yes\nServer: proxy.example.com\nPort: 8080\nAuthenticated Proxy Enabled: 0",
+            "Enabled: Yes\nServer: proxy-https.example.com\nPort: 8443\nAuthenticated Proxy Enabled: 0",
+            "Enabled: No"
         ]
-        
+
         detector = ProxyDetector(self.config)
         result = detector._detect_macos_proxy()
-        
-        # Vérifier que les proxies sont correctement détectés
+
         self.assertEqual(result['http'], 'http://proxy.example.com:8080')
         self.assertEqual(result['https'], 'http://proxy-https.example.com:8443')
-        
-    @unittest.skipIf(not sys.platform.startswith('linux'), "Test spécifique à Linux")
+
+    @patch('sys.platform', 'linux')  # Simule Linux
     @patch('subprocess.check_output')
     def test_detect_linux_proxy(self, mock_check_output):
         """Vérifie la détection de proxy sur Linux"""
-        # Configurer les mocks pour simuler un proxy Linux (GNOME)
+        # Reste du test inchangé
         mock_check_output.side_effect = [
-            "'manual'",  # mode
-            "'proxy.example.com'",  # http host
-            "8080",  # http port
-            "'proxy-https.example.com'",  # https host
-            "8443",  # https port
-            "['localhost', '127.0.0.1']"  # ignore-hosts
+            "'manual'",
+            "'proxy.example.com'",
+            "8080",
+            "'proxy-https.example.com'",
+            "8443",
+            "['localhost', '127.0.0.1']"
         ]
-        
+
         detector = ProxyDetector(self.config)
         result = detector._detect_linux_proxy()
-        
-        # Vérifier que les proxies sont correctement détectés
+
         self.assertEqual(result['http'], 'http://proxy.example.com:8080')
         self.assertEqual(result['https'], 'http://proxy-https.example.com:8443')
         self.assertEqual(result['no_proxy'], 'localhost,127.0.0.1')

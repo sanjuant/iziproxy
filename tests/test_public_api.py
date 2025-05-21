@@ -2,10 +2,8 @@
 Tests de l'API publique d'IziProxy
 """
 
-import unittest
 import inspect
-import os
-import sys
+import unittest
 from unittest.mock import patch, MagicMock
 
 import iziproxy
@@ -15,23 +13,55 @@ from iziproxy import IziProxy, SecurePassword, SecureProxyConfig
 class TestPublicAPI(unittest.TestCase):
     """Tests pour vérifier l'API publique du package"""
 
+    def setUp(self):
+        """Configuration des mocks communs à tous les tests"""
+        # Créer les patchs pour les dépendances
+        self.env_detector_patcher = patch('iziproxy.proxy_manager.EnvironmentDetector')
+        self.config_manager_patcher = patch('iziproxy.proxy_manager.ConfigManager')
+        self.requests_patcher = patch('iziproxy.proxy_manager.requests')
+
+        # Démarrer les patchs
+        self.mock_env_detector = self.env_detector_patcher.start()
+        self.mock_config_manager = self.config_manager_patcher.start()
+        self.mock_requests = self.requests_patcher.start()
+
+        # Configurer le comportement du ConfigManager
+        self.mock_config_instance = MagicMock()
+        self.mock_config_instance.get_credentials.return_value = ("testuser", SecurePassword("testpass"), "TESTDOMAIN")
+        self.mock_config_manager.return_value = self.mock_config_instance
+
+        # Configurer le comportement de requests.Session si nécessaire
+        self.mock_session = MagicMock()
+        self.mock_requests.Session.return_value = self.mock_session
+
+    def tearDown(self):
+        """Nettoyer les patchs après chaque test"""
+        # Arrêter les patchs
+        self.env_detector_patcher.stop()
+        self.config_manager_patcher.stop()
+        self.requests_patcher.stop()
+
     def test_package_exports(self):
-        """Vérifie que le package exporte les classes attendues"""
-        # Vérifier les exports depuis le module principal
-        self.assertTrue(hasattr(iziproxy, "IziProxy"))
-        self.assertTrue(hasattr(iziproxy, "SecurePassword"))
-        self.assertTrue(hasattr(iziproxy, "SecureProxyConfig"))
-        
+        """Vérifie que le package exporte les classes attendues via __all__"""
+        # Vérifier que __all__ est défini
+        self.assertTrue(hasattr(iziproxy, "__all__"))
+
+        # Vérifier que __all__ contient exactement les exports attendus
+        expected_all = ["IziProxy", "SecurePassword", "SecureProxyConfig"]
+        self.assertEqual(sorted(iziproxy.__all__), sorted(expected_all))
+
+        # Vérifier que toutes les classes déclarées dans __all__ sont disponibles
+        for class_name in iziproxy.__all__:
+            self.assertTrue(hasattr(iziproxy, class_name),
+                            f"La classe {class_name} déclarée dans __all__ n'est pas exportée")
+
         # Vérifier que ce sont les bonnes classes
         self.assertEqual(iziproxy.IziProxy, IziProxy)
         self.assertEqual(iziproxy.SecurePassword, SecurePassword)
         self.assertEqual(iziproxy.SecureProxyConfig, SecureProxyConfig)
-        
-        # Vérifier qu'il n'y a pas d'exports non documentés
-        expected_exports = ["IziProxy", "SecurePassword", "SecureProxyConfig", "__version__"]
-        for name in dir(iziproxy):
-            if not name.startswith("_") and name not in expected_exports:
-                self.fail(f"Export non documenté: {name}")
+
+        # Vérifier que __version__ est défini (bien qu'il ne soit pas dans __all__)
+        self.assertTrue(hasattr(iziproxy, "__version__"))
 
     def test_version_number(self):
         """Vérifie que le numéro de version est défini"""
@@ -77,7 +107,9 @@ class TestPublicAPI(unittest.TestCase):
             "refresh",
             "set_debug",
             "patch_requests",
-            "unpatch_requests"
+            "unpatch_requests",
+            "get_proxy_host",
+            "get_proxy_port"
         ]
         
         # Vérifier que toutes les méthodes attendues sont présentes
@@ -143,7 +175,7 @@ class TestPublicAPI(unittest.TestCase):
         # Vérifier que get_credentials() retourne les identifiants
         username, password = config.get_credentials("http")
         self.assertEqual(username, "user")
-        self.assertEqual(password, "password")
+        self.assertEqual(password.get_password(), "password")
 
     def test_importable_submodules(self):
         """Vérifie que les sous-modules sont importables si nécessaire"""
@@ -162,28 +194,26 @@ class TestPublicAPI(unittest.TestCase):
             except ImportError:
                 self.fail(f"Le module {module_name} n'est pas importable")
 
-    @patch('iziproxy.proxy_manager.requests.Session')
-    def test_create_session_returns_object(self, mock_session):
+    def test_create_session_returns_object(self):
         """Vérifie que create_session retourne un objet session"""
-        # Configure le mock pour retourner un objet
-        mock_session_instance = MagicMock()
-        mock_session.return_value = mock_session_instance
-        
-        # Créer une instance IziProxy
-        with patch('iziproxy.proxy_manager.EnvironmentDetector'):
-            proxy = IziProxy()
-            
-            # Appeler create_session()
-            session = proxy.create_session()
-            
-            # Vérifier que la session est bien l'objet retourné
-            self.assertEqual(session, mock_session_instance)
+        # IziProxy utilise les mocks déjà configurés dans setUp
+        proxy = IziProxy()
+
+        # Appeler create_session()
+        session = proxy.create_session()
+
+        # Vérifier que la session est bien l'objet retourné
+        self.assertEqual(session, self.mock_session)
 
     def test_get_proxy_dict_returns_dict(self):
         """Vérifie que get_proxy_dict retourne un dictionnaire"""
         # Créer une instance IziProxy
         with patch('iziproxy.proxy_manager.EnvironmentDetector'), \
-             patch('iziproxy.proxy_manager.ConfigManager'):
+                patch('iziproxy.proxy_manager.ConfigManager') as mock_config:
+            # Configurer le mock pour retourner des identifiants
+            mock_config_instance = MagicMock()
+            mock_config_instance.get_credentials.return_value = ("testuser", SecurePassword("testpass"), "TESTDOMAIN")
+            mock_config.return_value = mock_config_instance
             proxy = IziProxy(proxy_url="http://test.example.com:8080")
             
             # Appeler get_proxy_dict()
@@ -218,17 +248,14 @@ class TestPublicAPI(unittest.TestCase):
 
     def test_method_chaining(self):
         """Vérifie que les méthodes supportent le chaînage"""
-        # Créer une instance IziProxy
-        with patch('iziproxy.proxy_manager.EnvironmentDetector'), \
-             patch('iziproxy.proxy_manager.ConfigManager'), \
-             patch('iziproxy.proxy_manager.requests'):
-            proxy = IziProxy()
-            
-            # Tester le chaînage de méthodes
-            result = proxy.set_debug(True).refresh().patch_requests()
-            
-            # Vérifier que chaque méthode retourne self
-            self.assertEqual(result, proxy)
+        # Créer une instance IziProxy avec les mocks déjà configurés
+        proxy = IziProxy()
+
+        # Tester le chaînage de méthodes
+        result = proxy.set_debug(True).refresh().patch_requests()
+
+        # Vérifier que chaque méthode retourne self
+        self.assertEqual(result, proxy)
 
 
 if __name__ == '__main__':

@@ -2,14 +2,16 @@
 Module principal d'IziProxy pour la gestion intelligente des proxys
 """
 
-import os
 import logging
-import requests
+import os
 from urllib.parse import urlparse
 
-from .logger import get_logger
-from .env_detector import EnvironmentDetector
+import requests
+import requests.api
+
 from .config_manager import ConfigManager
+from .env_detector import EnvironmentDetector
+from .logger import get_logger
 from .proxy_detector import ProxyDetector
 from .secure_config import SecurePassword, SecureProxyConfig
 
@@ -24,6 +26,16 @@ except ImportError:
     NTLM_SUPPORT = False
     logger.debug("Support NTLM non disponible")
 
+    # Définir des versions factices pour éviter les erreurs
+    def is_ntlm_auth_available():
+        """Version factice qui retourne toujours False"""
+        return False
+
+    class NtlmProxyManager:
+        """Version factice de NtlmProxyManager"""
+        def create_ntlm_proxy_session(self, **kwargs):
+            logger.error("Support NTLM non disponible. Installez: pip install iziproxy[ntlm]")
+            raise ImportError("Support NTLM non disponible")
 
 class IziProxy:
     """
@@ -106,12 +118,15 @@ class IziProxy:
 
         # Obtenir la configuration selon l'environnement
         proxy_url = self._determine_proxy_url()
-        self._proxy_url = proxy_url  # Stocker pour référence future
 
         if proxy_url:
             # Utiliser l'URL explicite avec authentification si nécessaire
             logger.debug(f"Utilisation du proxy explicite: {proxy_url}")
             proxy_dict = self._create_proxy_dict(proxy_url)
+            
+            # Mise à jour de l'URL du proxy avec l'authentification
+            self._proxy_url = proxy_dict.get('http', proxy_url)
+            
             self._proxy_config = SecureProxyConfig(proxy_dict)
         else:
             # Sinon, détecter automatiquement
@@ -361,9 +376,12 @@ class IziProxy:
             username, password, _ = self._get_credentials()
 
             if username and password:
+                # Récupérer le mot de passe réel si c'est un SecurePassword
+                password_str = password.get_password() if isinstance(password, SecurePassword) else password
+
                 # Ajouter l'authentification à l'URL
                 parsed = urlparse(proxy_url)
-                auth_url = f"{parsed.scheme}://{username}:{SecurePassword(password)}@{parsed.netloc}{parsed.path or ''}"
+                auth_url = f"{parsed.scheme}://{username}:{password_str}@{parsed.netloc}{parsed.path or ''}"
                 logger.debug(f"URL de proxy avec authentification: {auth_url}")
                 proxy_url = auth_url
 
@@ -538,8 +556,6 @@ class IziProxy:
         Returns:
             IziProxy: Instance actuelle pour chaînage
         """
-        import requests
-        
         # Créer une session préconfigurée si nécessaire
         if not hasattr(self, '_patched_session'):
             self._patched_session = self.create_session()
@@ -563,9 +579,6 @@ class IziProxy:
         Returns:
             IziProxy: Instance actuelle pour chaînage
         """
-        import requests
-        import requests.api
-        
         # Restaurer les méthodes originales
         requests.get = requests.api.get
         requests.post = requests.api.post

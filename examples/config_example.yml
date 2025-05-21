@@ -16,15 +16,8 @@ environments:
     requires_auth: true
     auth_type: "ntlm"  # Authentification NTLM (nécessite le module ntlm_auth)
 
-# Configuration de la section credentials
-credentials:
-  # Cette section est maintenant simplifiée puisque les identifiants sont :
-  # - Recherchés dans variables d'environnement (IZI_USERNAME, IZI_PASSWORD, IZI_DOMAIN)
-  # - Recherchés dans le fichier .env
-  # - Stockés automatiquement dans le trousseau système (keyring)
-  # - Demandés interactivement si nécessaire
-
-# Note: Les identifiants (username, password, domain) doivent être configurés via:
+# Note: Les identifiants (username, password, domain) ne sont jamais stockés dans un fichier de configuration
+# Ils doivent être configurés via :
 #  - variables d'environnement: IZI_USERNAME, IZI_PASSWORD, IZI_DOMAIN
 #  - ou fichier .env
 
