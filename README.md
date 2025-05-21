@@ -319,6 +319,19 @@ La détection automatique sur Windows simplifie considérablement la transition 
 
 Les contributions sont les bienvenues ! Consultez notre [guide de contribution](CONTRIBUTING.md) pour plus d'informations.
 
+## 📚 Documentation
+
+Une documentation complète est disponible sur Read the Docs :
+
+[![Documentation Status](https://readthedocs.org/projects/iziproxy/badge/?version=latest)](https://iziproxy.readthedocs.io/fr/latest/?badge=latest)
+
+Visitez [iziproxy.readthedocs.io](https://iziproxy.readthedocs.io/) pour accéder à :
+- Guide de démarrage rapide
+- Exemples détaillés
+- Documentation complète de l'API
+- Guides de migration
+- Tutoriels et cas d'usage
+
 ## 📄 Licence
 
 Ce projet est sous licence MIT - voir le fichier [LICENSE](LICENSE) pour plus de détails.
