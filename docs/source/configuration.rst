@@ -53,11 +53,6 @@ Le fichier de configuration YAML doit être structuré comme suit :
        requires_auth: true
        auth_type: "ntlm"  # Authentification NTLM
    
-   # Configuration de la section credentials
-   credentials:
-     # Cette section est maintenant simplifiée
-     # Les identifiants sont gérés de façon sécurisée et transparente
-   
    # Configuration de la détection d'environnement
    environment_detection:
      method: "auto"  # auto, env_var, hostname, ip, ask

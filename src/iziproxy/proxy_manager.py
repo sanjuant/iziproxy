@@ -4,7 +4,9 @@ Module principal d'IziProxy pour la gestion intelligente des proxys
 
 import logging
 import os
+from urllib.error import HTTPError
 from urllib.parse import urlparse
+from urllib.request import ProxyHandler, build_opener
 
 import requests
 import requests.api
@@ -318,6 +320,15 @@ class IziProxy:
         """
         return self._get_credentials()
 
+    def clear_auth_cache(self):
+        """
+        Vide le cache de détection d'authentification
+        Utile quand la configuration proxy change
+        """
+        if hasattr(self, '_cache') and 'auth_requirement_cache' in self._cache:
+            del self._cache['auth_requirement_cache']
+            logger.debug("Cache auth requirement vidé")
+
     def refresh(self):
         """
         Force le rafraîchissement de toutes les détections et caches
@@ -332,6 +343,9 @@ class IziProxy:
         # Vider les caches
         self._proxy_config = None
         self.proxy_detector.clear_cache()
+
+        # Vider le cache d'auth
+        self.clear_auth_cache()
         
         # Redétecter la configuration
         self.get_proxy_config(force_refresh=True)
@@ -398,8 +412,70 @@ class IziProxy:
         Returns:
             bool: True si l'authentification est requise
         """
+        # ÉTAPE 1: Récupérer la configuration explicite
         env_config = self.config_manager.get_environment_config(self.current_env)
-        return env_config.get("requires_auth", False)
+        explicit_auth_required = env_config.get("requires_auth", None)
+
+        # ÉTAPE 2: Vérifier si configuration explicite existe
+        if explicit_auth_required is not None:
+            logger.debug(f"Auth explicitement configurée: {explicit_auth_required}")
+            return explicit_auth_required
+
+        # ÉTAPE 3: Pas de configuration explicite → test automatique
+        logger.debug("Pas de config auth explicite, test automatique")
+        return self._auto_detect_auth_requirement()
+
+    def _auto_detect_auth_requirement(self):
+        """
+        Détecte automatiquement si le proxy actuel nécessite une authentification
+
+        Returns:
+            bool: True si l'authentification est requise
+        """
+        # Utiliser un cache pour éviter les tests répétés
+        cache_key = "auth_requirement_cache"
+        if hasattr(self, '_cache') and cache_key in self._cache:
+            cached_result = self._cache[cache_key]
+            logger.debug(f"Auth requirement from cache: {cached_result}")
+            return cached_result
+
+        # Initialiser le cache si nécessaire
+        if not hasattr(self, '_cache'):
+            self._cache = {}
+
+        auth_required = False
+
+        try:
+            # Obtenir la configuration proxy actuelle (sans auth)
+            proxy_config = self.proxy_detector.detect_system_proxy()
+
+            if not proxy_config or not (proxy_config.get('http') or proxy_config.get('https')):
+                # Pas de proxy détecté, pas d'auth requise
+                logger.debug("Pas de proxy détecté, pas d'auth requise")
+                auth_required = False
+            else:
+                # Tester le proxy détecté
+                test_proxy_url = proxy_config.get('http') or proxy_config.get('https')
+
+                # S'assurer qu'il n'y a pas déjà d'auth dans l'URL
+                if '@' in test_proxy_url:
+                    logger.debug("Proxy URL contient déjà une auth")
+                    auth_required = True
+                else:
+                    # Test rapide pour voir si auth requise
+                    logger.debug(f"Test auth pour proxy: {test_proxy_url}")
+                    auth_required = self._quick_test_proxy_auth_required(test_proxy_url)
+
+        except Exception as e:
+            logger.debug(f"Erreur lors du test auto auth: {e}")
+            # En cas d'erreur, assumer qu'aucune auth n'est requise
+            auth_required = False
+
+        # Mettre en cache le résultat
+        self._cache[cache_key] = auth_required
+        logger.debug(f"Auth requirement detected: {auth_required}")
+
+        return auth_required
 
     def _is_ntlm_required(self):
         """
@@ -524,6 +600,51 @@ class IziProxy:
             logger.error(f"Erreur lors de la configuration NTLM: {e}")
             # Fallback à la configuration standard
             session.proxies = self.get_proxy_dict()
+
+    def _quick_test_proxy_auth_required(self, proxy_url, timeout=3):
+        """
+        Test rapide pour vérifier si un proxy nécessite une authentification
+
+        Args:
+            proxy_url (str): URL du proxy à tester
+            timeout (int): Timeout en secondes
+
+        Returns:
+            bool: True si authentification requise, False sinon
+        """
+        try:
+            # Extraire l'host et port du proxy
+            parsed = urlparse(proxy_url)
+            proxy_address = f"{parsed.hostname}:{parsed.port or 8080}"
+
+            # Test avec urllib (plus rapide que requests)
+            proxy_handler = ProxyHandler({
+                'http': f"http://{proxy_address}",
+                'https': f"http://{proxy_address}"
+            })
+            opener = build_opener(proxy_handler)
+
+            # Faire une requête de test simple
+            response = opener.open('http://httpbin.org/ip', timeout=timeout)
+
+            # Si on arrive ici sans exception, pas d'auth requise
+            logger.debug(f"Proxy {proxy_address} ne nécessite pas d'auth")
+            return False
+
+        except HTTPError as e:
+            if e.code == 407:
+                # Authentification proxy requise
+                logger.debug(f"Proxy {proxy_address} nécessite une authentification (407)")
+                return True
+            else:
+                # Autre erreur HTTP, assumer pas d'auth requise
+                logger.debug(f"Proxy {proxy_address} erreur {e.code}, assume pas d'auth")
+                return False
+
+        except Exception as e:
+            # Erreur de connexion ou autre, assumer pas d'auth requise
+            logger.debug(f"Proxy {proxy_address} erreur connexion: {e}, assume pas d'auth")
+            return False
 
     def set_debug(self, enabled=True):
         """
