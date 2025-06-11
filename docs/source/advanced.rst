@@ -163,8 +163,8 @@ Effectuer un diagnostic complet
    
    # Afficher les informations de diagnostic
    print(f"Environnement détecté: {proxy.get_current_environment()}")
-   print(f"Configuration proxy: {proxy.get_proxy_dict()}")
-   
+   print(f"Configuration proxy: {proxy.get_proxy_config()}")
+
    # Essayer une requête de test
    try:
        session = proxy.create_session()
@@ -173,10 +173,10 @@ Effectuer un diagnostic complet
        print(f"Réponse: {response.text}")
    except Exception as e:
        print(f"Erreur: {e}")
-   
+
    # Forcer le rafraîchissement et réessayer
    proxy.refresh()
-   print(f"Configuration après refresh: {proxy.get_proxy_dict()}")
+   print(f"Configuration après refresh: {proxy.get_proxy_config()}")
 
 Gestion sécurisée des identifiants
 --------------------------------

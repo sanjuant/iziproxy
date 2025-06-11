@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iziproxy"
-version = "0.4.2"
+version = "0.5.0"
 description = "Une bibliothèque Python pour la gestion simplifiée des proxys d'entreprise"
 readme = "README.md"
 authors = [
