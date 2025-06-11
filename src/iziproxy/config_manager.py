@@ -178,15 +178,15 @@ class ConfigManager:
             "environments": {
                 "local": {
                     "proxy_url": None,
-                    "requires_auth": False
+                    "requires_auth": None
                 },
                 "dev": {
                     "proxy_url": None,
-                    "requires_auth": False
+                    "requires_auth": None
                 },
                 "prod": {
                     "proxy_url": None,
-                    "requires_auth": False
+                    "requires_auth": None
                 }
             },
             "environment_detection": {
