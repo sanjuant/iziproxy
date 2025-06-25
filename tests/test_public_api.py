@@ -109,7 +109,8 @@ class TestPublicAPI(unittest.TestCase):
             "patch_requests",
             "unpatch_requests",
             "get_proxy_host",
-            "get_proxy_port"
+            "get_proxy_port",
+            "clear_auth_cache"
         ]
         
         # Vérifier que toutes les méthodes attendues sont présentes
