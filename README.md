@@ -9,7 +9,7 @@ Une bibliothèque Python pour utiliser les proxys d'entreprise sans y penser.
 Le même code fonctionne sur le poste du développeur (proxy NTLM), en
 recette (proxy Basic) et en production (pas de proxy) : IziProxy détecte
 l'environnement, trouve le proxy, découvre l'authentification attendue et
-configure `requests`.
+configure vos clients HTTP, en une ligne : `iziproxy.install()`.
 
 ## 🚀 Fonctionnalités
 
@@ -23,6 +23,7 @@ configure `requests`.
 - 🛡️ **Sécurité** : les identifiants ne sont envoyés qu'au proxy (jamais au site cible), masqués dans les journaux et chiffrés en mémoire
 - 🔌 **Intégration** : session `requests`, dictionnaire `proxies=`, variables d'environnement pour les outils externes, patch global de `requests`
 - 🔁 **Proxy local (façon cntlm / px)** : pip, git, curl, conda... traversent un proxy NTLM sans identifiants
+- ⚡ **Une ligne pour tout le processus** : `iziproxy.install()` configure requests, urllib, httpx, aiohttp et les sous-processus
 
 ## 📦 Installation
 
@@ -37,7 +38,64 @@ pip install iziproxy[all]       # NTLM + PAC
 
 Python 3.8 ou plus récent.
 
-## 🚦 Utilisation rapide
+## ⚡ Démarrage en 30 secondes
+
+```python
+import iziproxy
+
+iziproxy.install()
+```
+
+C'est tout. À partir de cette ligne, **tout le processus** passe le proxy
+d'entreprise, quel qu'il soit (sans authentification, Basic, NTLM, fichier PAC) :
+
+| Ce qui marche sans rien faire d'autre | Comment |
+|---|---|
+| `requests` (et `requests.get()` des bibliothèques tierces) | patché |
+| `urllib.request.urlopen()` | opener global installé |
+| `httpx`, gRPC, et tout client qui lit `HTTP(S)_PROXY` | variables d'environnement |
+| `aiohttp` | `ClientSession(trust_env=True)` |
+| pip, git, curl, conda lancés par `subprocess` | variables d'environnement héritées |
+
+- **Sans proxy** (production, réseau domestique), `install()` ne touche à
+  rien : gardez la ligne, le même code marche partout.
+- **Aucun mot de passe** dans les variables d'environnement : elles pointent
+  vers un petit proxy local (`127.0.0.1`) qui s'authentifie à la place des
+  clients.
+- **Sous Windows avec NTLM**, aucun identifiant à fournir : la session
+  Windows est utilisée.
+- **Réversible** : `iziproxy.uninstall()`, un bloc `with iziproxy.install():`,
+  ou simplement la fin du programme.
+
+Pour savoir ce qui a été configuré :
+
+```python
+print(iziproxy.install())
+# proxy http://proxy.corp:8080 (ntlm) ; local http://127.0.0.1:53211 ; requests, urllib, environment
+```
+
+### Et si ça ne marche pas tel quel ?
+
+Ajoutez seulement ce qui manque, du plus simple au plus précis :
+
+| Situation | Solution |
+|---|---|
+| Le proxy n'est pas détecté | `iziproxy.install(proxy_url="proxy.corp:8080")` ou `iziproxy.install(pac_url="http://wpad/proxy.pac")` |
+| Les identifiants ne sont pas trouvés | `iziproxy.install(username="jdupont", password="...", domain="CORP")`, variables `IZI_USERNAME` / `IZI_PASSWORD`, ou la saisie interactive (mémorisée dans le trousseau) |
+| Pas de saisie interactive (service, CI) | `iziproxy.install(interactive=False)` |
+| Certains hôtes doivent rester en direct | `iziproxy.install(no_proxy=["*.corp.local", "10.0.0.0/8"])` |
+| Réglages différents selon local / dev / prod | fichier `iziproxy.yml` (voir Configuration ci-dessous), puis `install()` sans paramètre |
+| Ne configurer que certains clients | `iziproxy.install(urllib=False, env_vars=False)` |
+| Comprendre ce qui se passe | `iziproxy.install(debug=True)` |
+| Réglage fin d'un client précis | `iziproxy.current().proxy` est l'instance `IziProxy` (voir ci-dessous) |
+
+`install()` accepte tous les paramètres de `IziProxy(...)`. Toutes les
+options sont décrites dans la page « Démarrage rapide » de la documentation.
+
+## 🎛️ Contrôle fin : la classe IziProxy
+
+Pour choisir précisément quel client est configuré et comment, utilisez
+directement `IziProxy` (c'est ce que fait `install()` en interne) :
 
 ```python
 from iziproxy import IziProxy

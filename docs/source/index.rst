@@ -43,25 +43,13 @@ Guide de démarrage rapide
 
 .. code-block:: python
 
-   from iziproxy import IziProxy
+   import iziproxy
 
-   # Création avec détection automatique
-   proxy = IziProxy()
+   iziproxy.install()   # requests, urllib, httpx, pip, git... passent le proxy
 
-   # Obtenir une session requests préconfigurée
-   session = proxy.create_session()
-   response = session.get('https://example.com')
-
-   # Utiliser comme dictionnaire de proxy standard
-   proxies = proxy.get_proxy_dict()
-
-   # Définir les variables d'environnement
-   proxy.set_environment_variables()
-   
-   # ...utiliser d'autres bibliothèques qui respectent les variables d'environnement...
-   
-   # Nettoyer les variables d'environnement
-   proxy.clear_environment_variables()
+Sans proxy, rien n'est modifié : le même code fonctionne partout. Voir
+:doc:`quickstart` pour les options, et :doc:`usage` pour le contrôle fin avec
+la classe ``IziProxy``.
 
 
 Contenu
@@ -71,6 +59,7 @@ Contenu
    :maxdepth: 2
    
    installation
+   quickstart
    usage
    clients
    configuration

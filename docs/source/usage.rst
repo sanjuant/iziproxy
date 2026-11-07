@@ -1,6 +1,12 @@
 Utilisation
 ===========
 
+.. tip::
+
+   Pour que tout le processus passe le proxy en une ligne, utilisez
+   ``iziproxy.install()`` (voir :doc:`quickstart`). Cette page décrit la
+   classe ``IziProxy``, pour configurer chaque client précisément.
+
 Création
 --------
 

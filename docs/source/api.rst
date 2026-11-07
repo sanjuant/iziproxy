@@ -1,6 +1,18 @@
 Référence de l'API
 ==================
 
+Configuration en une ligne
+--------------------------
+
+.. autofunction:: iziproxy.install
+
+.. autofunction:: iziproxy.uninstall
+
+.. autofunction:: iziproxy.current
+
+.. autoclass:: iziproxy.Installation
+   :members: describe, uninstall
+
 Classe principale
 -----------------
 
