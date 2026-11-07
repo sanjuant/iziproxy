@@ -72,6 +72,7 @@ Contenu
    
    installation
    usage
+   clients
    configuration
    api
    examples

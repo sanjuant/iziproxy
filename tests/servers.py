@@ -121,6 +121,14 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        # Un client qui ferme une connexion keep-alive inactive n'est pas une erreur
+        import sys
+
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
 
 class OriginServer:
     """Serveur origine HTTP ou HTTPS sur 127.0.0.1."""

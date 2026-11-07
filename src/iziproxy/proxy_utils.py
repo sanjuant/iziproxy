@@ -382,3 +382,20 @@ def probe_proxy_auth(proxy_url, timeout=3.0):
         return None, {}
     finally:
         sock.close()
+
+
+def basic_proxy_authorization(proxy_url):
+    """
+    En-tête Proxy-Authorization Basic (UTF-8, RFC 7617) pour les
+    identifiants présents dans une URL de proxy.
+
+    Returns:
+        str|None: Valeur de l'en-tête, None sans identifiants
+    """
+    import base64
+
+    username, password = extract_credentials(proxy_url)
+    if not username:
+        return None
+    token = f"{username}:{password or ''}".encode("utf-8")
+    return "Basic " + base64.b64encode(token).decode("ascii")

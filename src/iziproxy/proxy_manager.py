@@ -106,6 +106,7 @@ class IziProxy:
         self._pac_results = {}
         self._saved_env = None
         self._env_local_proxy = None
+        self._shared_local_proxy = None
         self._local_proxies = []
         self._warned = set()
 
@@ -504,8 +505,204 @@ class IziProxy:
         with self._lock:
             proxies, self._local_proxies = self._local_proxies, []
             self._env_local_proxy = None
+            self._shared_local_proxy = None
         for local in proxies:
             local.stop()
+
+    # ------------------------------------------------------------------ #
+    # API publique : autres clients HTTP
+    # ------------------------------------------------------------------ #
+    def local_proxy_url(self):
+        """
+        URL d'un proxy local partagé (démarré à la première demande, arrêté
+        par stop_local_proxies() ou en sortie de bloc ``with``).
+
+        Il sert aux clients qui ne savent pas parler NTLM ou évaluer un PAC :
+        navigateurs, aiohttp, gRPC...
+
+        Returns:
+            str: URL du type http://127.0.0.1:port
+        """
+        with self._lock:
+            local = self._shared_local_proxy
+            if local is None or not local.running:
+                local = self._shared_local_proxy = self.start_local_proxy()
+            return local.url
+
+    def proxy_for(self, url):
+        """
+        URL de proxy à donner à un client HTTP quelconque pour une URL cible.
+
+        - connexion directe (exclusion, PAC « DIRECT », pas de proxy) : None
+        - proxy sans authentification ou Basic : URL du proxy, identifiants
+          inclus et encodés
+        - proxy NTLM / Negotiate : URL du proxy local partagé, qui
+          s'authentifie à la place du client
+
+        Les schémas ws:// et wss:// sont traités comme http:// et https://.
+
+        Args:
+            url (str): URL cible
+
+        Returns:
+            str|None: URL du proxy
+        """
+        scheme, sep, rest = url.partition("://")
+        scheme = {"ws": "http", "wss": "https"}.get(scheme.lower(), scheme.lower())
+        target = f"{scheme}{sep}{rest}"
+        if not self._raw_proxies(target):
+            return None
+        if self._uses_ntlm():
+            return self.local_proxy_url()
+        resolved = self._resolve(target)
+        return resolved.get(scheme) or resolved.get("https") or resolved.get("http")
+
+    def httpx_client(self, **kwargs):
+        """
+        Client httpx synchrone dont le transport choisit le proxy à chaque
+        requête (voir iziproxy.integrations.httpx_transport).
+
+        Les options de transport (verify, cert, http1, http2, limits,
+        retries, local_address, socket_options) sont transmises au
+        transport ; les autres au client httpx.
+
+        Returns:
+            httpx.Client: Client configuré
+        """
+        from .integrations.httpx_transport import build_client
+
+        return build_client(self, asynchronous=False, **kwargs)
+
+    def httpx_async_client(self, **kwargs):
+        """
+        Client httpx asynchrone (voir httpx_client()).
+
+        Returns:
+            httpx.AsyncClient: Client configuré
+        """
+        from .integrations.httpx_transport import build_client
+
+        return build_client(self, asynchronous=True, **kwargs)
+
+    def aiohttp_session(self, **kwargs):
+        """
+        Session aiohttp configurée (à créer dans une coroutine).
+
+        aiohttp n'offre pas de point d'extension public pour choisir le proxy
+        requête par requête : la session passe donc par le proxy local
+        partagé, qui applique PAC, exclusions et authentification. Sans
+        proxy, la session est directe.
+
+        Returns:
+            aiohttp.ClientSession: Session configurée
+        """
+        from .integrations.aiohttp_session import build_session
+
+        return build_session(self, **kwargs)
+
+    def urllib3_pool_manager(self, **kwargs):
+        """
+        PoolManager urllib3 qui choisit le proxy à chaque requête.
+
+        Returns:
+            iziproxy.integrations.urllib3_pool.IziPoolManager: Gestionnaire configuré
+        """
+        from .integrations.urllib3_pool import IziPoolManager
+
+        return IziPoolManager(self, **kwargs)
+
+    def urllib_opener(self, *handlers):
+        """
+        OpenerDirector urllib.request qui choisit le proxy à chaque requête.
+
+        Args:
+            *handlers: Handlers urllib supplémentaires (cookies, auth...)
+
+        Returns:
+            urllib.request.OpenerDirector: Opener configuré
+        """
+        from .integrations.urllib_handler import build_opener
+
+        return build_opener(self, *handlers)
+
+    def install_urllib_opener(self, *handlers):
+        """
+        Installe urllib_opener() comme opener global : urllib.request.urlopen()
+        (y compris dans les bibliothèques tierces) passe alors par IziProxy.
+
+        Returns:
+            IziProxy: L'instance (chaînage)
+        """
+        import urllib.request
+
+        urllib.request.install_opener(self.urllib_opener(*handlers))
+        return self
+
+    def http_connection(self, url, timeout=None, context=None):
+        """
+        Connexion http.client prête à l'emploi pour l'hôte d'une URL.
+
+        Via un proxy, la connexion ouvre un tunnel CONNECT : les requêtes
+        s'écrivent comme en direct (chemin relatif).
+
+        Args:
+            url (str): URL (ou origine) cible, ex. https://api.example.com
+            timeout (float): Délai en secondes
+            context (ssl.SSLContext): Contexte TLS pour une cible HTTPS
+
+        Returns:
+            http.client.HTTPConnection: Connexion (HTTPSConnection pour https)
+        """
+        from .integrations.http_client import connection_for
+
+        return connection_for(self, url, timeout=timeout, context=context)
+
+    def websocket_proxy(self, uri):
+        """
+        Valeur du paramètre ``proxy`` de websockets.connect() pour une URI
+        ws:// ou wss:// (None : connexion directe).
+
+        websockets ne décode pas les identifiants de l'URL du proxy (un mot
+        de passe encodé serait envoyé tel quel) : avec un proxy authentifié,
+        la connexion passe par le proxy local partagé.
+        """
+        proxy = self.proxy_for(uri)
+        if proxy and has_credentials(proxy):
+            return self.local_proxy_url()
+        return proxy
+
+    def grpc_channel_options(self, target, secure=True):
+        """
+        Options de canal gRPC pour une cible « hôte:port ».
+
+        Args:
+            target (str): Cible gRPC (hôte:port, éventuellement dns:///hôte:port)
+            secure (bool): Canal TLS (https) ou non (http)
+
+        Returns:
+            list: Options à passer à grpc.secure_channel() / insecure_channel()
+        """
+        from .integrations.tools import grpc_options
+
+        return grpc_options(self, target, secure)
+
+    def selenium_proxy(self):
+        """
+        Objet selenium.webdriver.common.proxy.Proxy pointant vers le proxy
+        local partagé (ou connexion directe sans proxy).
+        """
+        from .integrations.tools import selenium_proxy
+
+        return selenium_proxy(self)
+
+    def playwright_proxy(self):
+        """
+        Paramètre ``proxy`` de Playwright (launch() ou new_context()), ou
+        None sans proxy.
+        """
+        from .integrations.tools import playwright_proxy
+
+        return playwright_proxy(self)
 
     def set_environment_variables(self, local_proxy=False):
         """

@@ -30,7 +30,9 @@ configure `requests`.
 pip install iziproxy            # proxys sans authentification ou Basic
 pip install iziproxy[ntlm]      # + NTLM / Negotiate (pyspnego)
 pip install iziproxy[pac]       # + fichiers PAC (pypac)
-pip install iziproxy[all]       # tout
+pip install iziproxy[httpx]     # + adaptateur httpx
+pip install iziproxy[aiohttp]   # + adaptateur aiohttp
+pip install iziproxy[all]       # NTLM + PAC
 ```
 
 Python 3.8 ou plus récent.
@@ -73,6 +75,35 @@ proxy.requires_auth        # True / False (détecté si non configuré)
 proxy.auth_type            # 'basic' ou 'ntlm'
 proxy.get_proxy_config()   # dictionnaire affichable, mots de passe masqués
 ```
+
+## 🧩 Autres clients HTTP
+
+Chaque client a son adaptateur, avec les mêmes règles (PAC par URL,
+exclusions, Basic, NTLM via le proxy local) :
+
+| Client | Adaptateur |
+|---|---|
+| requests | `create_session()`, `patch_requests()` |
+| httpx | `httpx_client()`, `httpx_async_client()` |
+| aiohttp | `aiohttp_session()` |
+| urllib3 | `urllib3_pool_manager()` |
+| urllib.request | `urllib_opener()`, `install_urllib_opener()` |
+| http.client | `http_connection(url)` |
+| websockets | `connect(uri, proxy=proxy.websocket_proxy(uri))` |
+| gRPC | `grpc_channel_options(target)` |
+| Selenium / Playwright | `selenium_proxy()`, `playwright_proxy()` |
+| pip, git, curl… | `set_environment_variables(local_proxy=True)` |
+| tout autre client | `proxy_for(url)`, `local_proxy_url()` |
+
+```python
+with proxy.httpx_client() as client:
+    client.get("https://example.com")
+
+async with proxy.aiohttp_session() as session:
+    await session.get("https://example.com")
+```
+
+Détails dans la documentation (page « Autres clients HTTP »).
 
 ## ⚙️ Configuration
 

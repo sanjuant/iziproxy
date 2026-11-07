@@ -36,6 +36,24 @@ Ces modules ne font pas partie de l'API publique et peuvent évoluer.
 .. automodule:: iziproxy.adapters
    :members:
 
+.. automodule:: iziproxy.integrations.httpx_transport
+   :members: IziHTTPXTransport, AsyncIziHTTPXTransport, build_client
+
+.. automodule:: iziproxy.integrations.aiohttp_session
+   :members:
+
+.. automodule:: iziproxy.integrations.urllib3_pool
+   :members:
+
+.. automodule:: iziproxy.integrations.urllib_handler
+   :members:
+
+.. automodule:: iziproxy.integrations.http_client
+   :members:
+
+.. automodule:: iziproxy.integrations.tools
+   :members:
+
 .. automodule:: iziproxy.ntlm_auth
    :members:
 
