@@ -1,68 +1,32 @@
 Installation
 ============
 
-IziProxy est disponible sur PyPI et peut être installé avec pip.
-
-Installation basique
--------------------
-
-Pour installer IziProxy avec les fonctionnalités de base :
+IziProxy nécessite Python 3.8 ou plus récent.
 
 .. code-block:: bash
 
-   pip install iziproxy
-
-Installation complète (avec support NTLM)
-----------------------------------------
-
-Pour installer IziProxy avec le support pour l'authentification NTLM (recommandé pour les environnements Windows d'entreprise) :
-
-.. code-block:: bash
-
-   pip install iziproxy[ntlm]
-
-Cette installation inclut les dépendances supplémentaires suivantes :
-
-* ``ntlm-auth`` - Pour l'authentification NTLM
-* ``pycryptodomex`` - Pour le support des algorithmes de hachage nécessaires à NTLM
+   pip install iziproxy            # proxys sans authentification ou Basic
+   pip install iziproxy[ntlm]      # + NTLM / Negotiate (pyspnego)
+   pip install iziproxy[pac]       # + fichiers PAC (pypac)
+   pip install iziproxy[all]       # tout
 
 Dépendances
 -----------
 
-IziProxy dépend des bibliothèques suivantes :
+* ``requests`` et ``urllib3`` : requêtes HTTP
+* ``PyYAML`` : fichier de configuration
+* ``keyring`` : trousseau système pour les mots de passe
+* ``cryptography`` : chiffrement des mots de passe en mémoire
+* ``pyspnego`` (option ``ntlm``) : jetons NTLM / Negotiate, SSPI sous Windows,
+  MD4 intégré (compatible OpenSSL 3)
+* ``pypac`` (option ``pac``) : évaluation des fichiers PAC
 
-* ``requests`` - Pour les requêtes HTTP
-* ``PyYAML`` - Pour la lecture des fichiers de configuration
-* ``keyring`` - Pour le stockage sécurisé des identifiants
-* ``cryptography`` - Pour le chiffrement des mots de passe en mémoire
-
-Installation depuis les sources
-------------------------------
-
-Pour installer IziProxy depuis les sources :
+Installation de développement
+-----------------------------
 
 .. code-block:: bash
 
-   git clone https://github.com/votrenom/iziproxy.git
+   git clone https://github.com/sanjuant/iziproxy.git
    cd iziproxy
-   pip install -e .
-
-Installation pour le développement
---------------------------------
-
-Pour installer IziProxy avec les dépendances de développement :
-
-.. code-block:: bash
-
-   pip install -e ".[dev]"
-
-Cela installera :
-
-* ``pytest`` et ``pytest-cov`` pour les tests
-* ``black`` et ``flake8`` pour le formatage du code
-* ``sphinx`` pour la génération de la documentation
-
-Compatibilité Python
--------------------
-
-IziProxy est compatible avec Python 3.7 et versions supérieures.
+   pip install -e .[dev]
+   pytest

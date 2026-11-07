@@ -1,7 +1,8 @@
 """
-Module de gestion de la configuration d'IziProxy
+Chargement de la configuration d'IziProxy et recherche des identifiants.
 """
 
+import copy
 import getpass
 import logging
 import os
@@ -10,27 +11,64 @@ import socket
 from pathlib import Path
 
 import keyring
+import keyring.errors
 import yaml
 
-from iziproxy.secure_config import SecurePassword
-from iziproxy.password_manager import PasswordManager
+from .password_manager import PasswordManager
+from .secure_config import SecurePassword
 
-sys_platform = platform.system().lower()
-
-# Configuration du logger
 logger = logging.getLogger("iziproxy")
+
+DEFAULT_CONFIG = {
+    "environments": {
+        "local": {"proxy_url": None, "requires_auth": None},
+        "dev": {"proxy_url": None, "requires_auth": None},
+        "prod": {"proxy_url": None, "requires_auth": None},
+    },
+    "environment_detection": {
+        "method": "auto",
+        "hostname_patterns": {
+            "local": ["local", "laptop", "desktop", "dev-pc"],
+            "dev": ["dev", "staging", "test", "preprod"],
+            "prod": ["prod", "production"],
+        },
+        "hostname_regex": {
+            "local": ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"],
+            "dev": ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"],
+            "prod": ["^prod\\d*-", "^production\\d*-"],
+        },
+        "ip_ranges": {},
+    },
+    "system_proxy": {
+        "use_system_proxy": True,
+        "detect_env_vars": True,
+        "detect_pac": True,
+    },
+    "credentials": {
+        "prompt": True,
+    },
+}
+
+# Variables d'environnement reconnues, par ordre de priorité
+CREDENTIAL_ENV_VARS = {
+    "username": ["IZI_USERNAME", "izi_username", "PROXY_USERNAME", "proxy_username"],
+    "password": ["IZI_PASSWORD", "izi_password", "PROXY_PASSWORD", "proxy_password"],
+    "domain": ["IZI_DOMAIN", "izi_domain", "PROXY_DOMAIN", "proxy_domain"],
+}
+
+# Clé du nom d'utilisateur dans le trousseau
+USERNAME_KEY = "__username__"
+LEGACY_USERNAME_KEY = "username"
 
 
 class ConfigManager:
     """
-    Gère la configuration d'IziProxy depuis différentes sources
+    Gère la configuration d'IziProxy.
 
-    Cette classe permet de:
-    - Charger la configuration depuis un fichier YAML
-    - Rechercher automatiquement les fichiers de configuration
-    - Gérer les valeurs par défaut
-    - Sécuriser les identifiants avec keyring
-    - Saisie interactive GUI/CLI adaptative
+    - Charge un fichier YAML (chemin explicite ou emplacements standards)
+    - Fusionne avec les valeurs par défaut
+    - Recherche les identifiants : variables d'environnement, fichier .env,
+      trousseau système (keyring), session courante, saisie interactive
     """
 
     DEFAULT_CONFIG_PATHS = [
@@ -42,509 +80,350 @@ class ConfigManager:
         "~/.iziproxy.yaml",
     ]
 
+    DOTENV_PATHS = ["./.env", "~/.config/.env", "~/.env"]
+
     def __init__(self, config_path=None):
         """
-        Initialise le gestionnaire de configuration
-
         Args:
-            config_path (str, optional): Chemin vers un fichier de configuration
+            config_path (str, optional): Fichier de configuration YAML
         """
         self.config_path = config_path
+        self.loaded_from = None
         self.config = {}
-        self.password_manager = PasswordManager(logger)
+        self._password_manager = None
         self._load_config()
 
+    @property
+    def password_manager(self):
+        """Gestionnaire de saisie, créé à la demande."""
+        if self._password_manager is None:
+            self._password_manager = PasswordManager(logger)
+        return self._password_manager
+
+    # ------------------------------------------------------------------ #
+    # Configuration
+    # ------------------------------------------------------------------ #
     def _load_config(self):
-        """
-        Charge la configuration depuis un fichier YAML ou utilise la configuration par défaut
-        """
+        """Charge le premier fichier trouvé, sinon la configuration par défaut."""
+        candidates = []
         if self.config_path:
-            # Utilisation du fichier spécifié
-            config_path = Path(self.config_path).expanduser().resolve()
-            if config_path.exists():
-                self._load_yaml_config(str(config_path))
-                return
+            path = Path(self.config_path).expanduser()
+            if path.exists():
+                candidates.append(path)
             else:
-                logger.warning(f"Fichier de configuration spécifié introuvable: {self.config_path}")
+                logger.warning("Configuration file not found: %s", self.config_path)
+        candidates += [Path(p).expanduser() for p in self.DEFAULT_CONFIG_PATHS]
 
-        # Recherche dans les emplacements par défaut
-        for path in self.DEFAULT_CONFIG_PATHS:
-            expanded_path = os.path.expanduser(path)
-            if os.path.exists(expanded_path):
-                self._load_yaml_config(expanded_path)
+        for path in candidates:
+            if path.is_file():
+                self.config = self._load_yaml_config(path)
                 return
 
-        # Pas de configuration trouvée, utiliser les valeurs par défaut
-        logger.debug("Aucun fichier de configuration trouvé, utilisation des valeurs par défaut")
+        logger.debug("No configuration file found, using defaults")
         self.config = self._get_default_config()
-
-    def _get_current_session_info(self):
-        """
-        Détecte les informations de la session en cours (nom d'utilisateur et domaine)
-
-        Returns:
-            tuple: (username, domain)
-        """
-        username = None
-        domain = None
-
-        # Détection du nom d'utilisateur
-        try:
-            # Essayer d'obtenir le nom d'utilisateur via getpass (multi-plateforme)
-            username = getpass.getuser()
-        except Exception as e:
-            logger.debug(f"Erreur lors de la détection du nom d'utilisateur: {e}")
-            # Alternative via les variables d'environnement
-            if sys_platform == 'windows':
-                username = os.environ.get('USERNAME')
-            else:
-                username = os.environ.get('USER')
-
-        # Détection du domaine (spécifique à Windows pour le domaine AD)
-        if platform.system() == "Windows":
-            # Récupérer le domaine Windows
-            domain = os.environ.get('USERDOMAIN')
-
-            # Si le domaine est le même que le nom de la machine, il ne s'agit pas d'un domaine AD
-            computer_name = os.environ.get('COMPUTERNAME')
-            if domain and computer_name and domain.upper() == computer_name.upper():
-                # Ce n'est pas un domaine AD mais un groupe de travail
-                domain = None
-
-            # Alternative: extraire le domaine du nom d'utilisateur au format domain\username
-            if not domain and username and '\\' in username:
-                domain, username = username.split('\\', 1)
-        else:  # Unix/Linux/MacOS
-            # Récupération du nom d'utilisateur
-            username = os.environ.get("USER")
-
-            # Extraction du domaine à partir du FQDN
-            try:
-                fqdn = socket.getfqdn()
-                # Diviser le FQDN en parties (hostname.example.com -> ["hostname", "example", "com"])
-                parts = fqdn.split('.')
-                if len(parts) > 1:
-                    # Joindre toutes les parties sauf la première pour former le domaine
-                    domain = '.'.join(parts[1:])
-            except Exception:
-                # En cas d'erreur, laisser le domaine à None
-                pass
-
-        logger.debug(f"Informations de session détectées - Utilisateur: {username}, Domaine: {domain}")
-        return username, domain
 
     def _load_yaml_config(self, path):
         """
-        Charge la configuration depuis un fichier YAML
-
-        Args:
-            path (str): Chemin vers le fichier de configuration
-        """
-        try:
-            with open(path, 'r', encoding='utf-8') as file:
-                loaded_config = yaml.safe_load(file)
-                if loaded_config:
-                    logger.info(f"Configuration chargée depuis {path}")
-                    # Fusionner avec les valeurs par défaut pour assurer la complétude
-                    default_config = self._get_default_config()
-                    self._deep_merge(default_config, loaded_config)
-                    self.config = default_config
-                else:
-                    logger.warning(f"Fichier de configuration vide: {path}")
-                    self.config = self._get_default_config()
-        except Exception as e:
-            logger.error(f"Erreur lors du chargement de la configuration: {e}")
-            self.config = self._get_default_config()
-
-    def _deep_merge(self, target, source):
-        """
-        Fusionne récursivement deux dictionnaires
-
-        Args:
-            target (dict): Dictionnaire cible (sera modifié)
-            source (dict): Dictionnaire source
-        """
-        for key, value in source.items():
-            if key in target and isinstance(target[key], dict) and isinstance(value, dict):
-                self._deep_merge(target[key], value)
-            else:
-                target[key] = value
-
-    def _get_default_config(self):
-        """
-        Retourne la configuration par défaut
-
-        Returns:
-            dict: Configuration par défaut
-        """
-        return {
-            "environments": {
-                "local": {
-                    "proxy_url": None,
-                    "requires_auth": None
-                },
-                "dev": {
-                    "proxy_url": None,
-                    "requires_auth": None
-                },
-                "prod": {
-                    "proxy_url": None,
-                    "requires_auth": None
-                }
-            },
-            "environment_detection": {
-                "method": "auto",
-                "hostname_patterns": {
-                    "local": ["local", "laptop", "desktop", "dev-pc"],
-                    "dev": ["dev", "staging", "test", "preprod"],
-                    "prod": ["prod", "production"]
-                },
-                "hostname_regex": {
-                    "local": ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"],
-                    "dev": ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"],
-                    "prod": ["^prod\\d*-", "^production\\d*-"]
-                },
-                "ip_ranges": {}
-            },
-            "system_proxy": {
-                "use_system_proxy": True,
-                "detect_pac": True
-            }
-        }
-
-    def get_config(self):
-        """
-        Retourne la configuration complète
+        Lit un fichier YAML et le fusionne avec la configuration par défaut.
 
         Returns:
             dict: Configuration complète
         """
+        config = self._get_default_config()
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                loaded = yaml.safe_load(file)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.error("Cannot load configuration %s: %s", path, exc)
+            return config
+
+        if loaded is None:
+            logger.warning("Empty configuration file: %s", path)
+            return config
+        if not isinstance(loaded, dict):
+            logger.error("Invalid configuration %s: expected a mapping", path)
+            return config
+
+        self._deep_merge(config, loaded)
+        self.loaded_from = str(path)
+        logger.info("Configuration loaded from %s", path)
+        return config
+
+    def _deep_merge(self, target, source):
+        """Fusionne récursivement source dans target."""
+        for key, value in source.items():
+            if isinstance(target.get(key), dict) and isinstance(value, dict):
+                self._deep_merge(target[key], value)
+            else:
+                target[key] = value
+
+    @staticmethod
+    def _get_default_config():
+        """Retourne une copie de la configuration par défaut."""
+        return copy.deepcopy(DEFAULT_CONFIG)
+
+    def get_config(self):
+        """Retourne la configuration complète."""
         return self.config
 
     def get_environment_config(self, env_type):
         """
-        Retourne la configuration spécifique à un environnement
-
-        Args:
-            env_type (str): Type d'environnement ('local', 'dev', 'prod')
+        Retourne la configuration d'un environnement.
 
         Returns:
-            dict: Configuration de l'environnement
+            dict: Configuration ({} si inconnu)
         """
-        if "environments" in self.config and env_type in self.config["environments"]:
-            return self.config["environments"][env_type]
-        return {}
+        envs = self.config.get("environments") or {}
+        return envs.get(env_type) or {}
 
+    # ------------------------------------------------------------------ #
+    # Sources d'identifiants
+    # ------------------------------------------------------------------ #
     def _load_dotenv(self):
         """
-        Charge les variables d'environnement depuis un fichier .env
+        Lit le premier fichier .env trouvé.
 
         Returns:
-            dict: Variables d'environnement chargées
+            dict: Variables lues
         """
-        env_vars = {}
-        env_paths = [
-            "./.env",
-            "~/.config/.env",
-            "~/.env",
-        ]
-
-        for path in env_paths:
-            expanded_path = os.path.expanduser(path)
-            if os.path.exists(expanded_path):
-                try:
-                    with open(expanded_path, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line and not line.startswith('#'):
-                                if '=' in line:
-                                    key, value = line.split('=', 1)
-                                    env_vars[key.strip()] = value.strip().strip('"\'')
-                    logger.debug(f"Variables d'environnement chargées depuis {expanded_path}")
-                    break
-                except Exception as e:
-                    logger.debug(f"Erreur lors du chargement du fichier .env: {e}")
-
-        return env_vars
+        for path in self.DOTENV_PATHS:
+            expanded = os.path.expanduser(path)
+            if not os.path.isfile(expanded):
+                continue
+            values = {}
+            try:
+                with open(expanded, "r", encoding="utf-8") as file:
+                    for line in file:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        if line.startswith("export "):
+                            line = line[len("export "):]
+                        key, value = line.split("=", 1)
+                        value = value.strip()
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                            value = value[1:-1]
+                        values[key.strip()] = value
+            except OSError as exc:
+                logger.debug("Cannot read %s: %s", expanded, exc)
+                continue
+            logger.debug("Variables loaded from %s", expanded)
+            return values
+        return {}
 
     def _get_credentials_from_env_vars(self, username, password, domain):
         """
-        Récupère les identifiants depuis les variables d'environnement et le fichier .env
-
-        Args:
-            username (str|None): Nom d'utilisateur actuel ou None
-            password (str|None): Mot de passe actuel ou None
-            domain (str|None): Domaine actuel ou None
+        Complète les identifiants depuis l'environnement puis le fichier .env.
 
         Returns:
             tuple: (username, password, domain)
         """
-        # Charger les variables depuis le fichier .env
-        env_vars = self._load_dotenv()
-
-        # Liste des noms de variables à vérifier (en majuscules et minuscules)
-        var_names = {
-            'username': [
-                "IZI_USERNAME", "izi_username",  # Nouvelles variables avec préfixe IZI
-                "PROXY_USERNAME", "proxy_username"  # Variables originales pour rétrocompatibilité
-            ],
-            'password': [
-                "IZI_PASSWORD", "izi_password",  # Nouvelles variables avec préfixe IZI
-                "PROXY_PASSWORD", "proxy_password"  # Variables originales pour rétrocompatibilité
-            ],
-            'domain': [
-                "IZI_DOMAIN", "izi_domain",  # Nouvelles variables avec préfixe IZI
-                "PROXY_DOMAIN", "proxy_domain"  # Variables originales pour rétrocompatibilité
-            ]
-        }
-
-        # Récupérer le nom d'utilisateur s'il n'est pas déjà défini
-        if not username:
-            for var_name in var_names['username']:
-                if var_name in os.environ:
-                    username = os.environ[var_name]
-                    logger.debug(f"Nom d'utilisateur trouvé dans la variable d'environnement {var_name}")
+        dotenv = self._load_dotenv()
+        found = {"username": username, "password": password, "domain": domain}
+        for field, names in CREDENTIAL_ENV_VARS.items():
+            if found[field]:
+                continue
+            for name in names:
+                value = os.environ.get(name) or dotenv.get(name)
+                if value:
+                    found[field] = value
+                    logger.debug("Proxy %s read from %s", field, name)
                     break
-                elif var_name in env_vars:
-                    username = env_vars[var_name]
-                    logger.debug(f"Nom d'utilisateur trouvé dans le fichier .env ({var_name})")
-                    break
+        return found["username"], found["password"], found["domain"]
 
-        # Récupérer le mot de passe s'il n'est pas déjà défini
-        if not password:
-            for var_name in var_names['password']:
-                if var_name in os.environ:
-                    password = os.environ[var_name]
-                    logger.debug(f"Mot de passe trouvé dans la variable d'environnement {var_name}")
-                    break
-                elif var_name in env_vars:
-                    password = env_vars[var_name]
-                    logger.debug(f"Mot de passe trouvé dans le fichier .env ({var_name})")
-                    break
+    @staticmethod
+    def _keyring_service(service_name, env_type, auth_type):
+        return f"{service_name}_{env_type}-{auth_type}"
 
-        # Récupérer le domaine s'il n'est pas déjà défini
-        if not domain:
-            for var_name in var_names['domain']:
-                if var_name in os.environ:
-                    domain = os.environ[var_name]
-                    logger.debug(f"Domaine trouvé dans la variable d'environnement {var_name}")
-                    break
-                elif var_name in env_vars:
-                    domain = env_vars[var_name]
-                    logger.debug(f"Domaine trouvé dans le fichier .env ({var_name})")
-                    break
-
-        if username and password:
-            logger.debug(f"Identifiants trouvés dans les variables d'environnement ou le fichier .env")
-
-        return username, password, domain
-
-    def _get_credentials_from_keyring(self, username, password, domain, keyring_service, username_key, service_name):
+    def _get_credentials_from_keyring(self, username, password, domain, keyring_service,
+                                      username_key=USERNAME_KEY, service_name="iziproxy"):
         """
-        Récupère les identifiants depuis le keyring
-
-        Args:
-            username (str): Nom d'utilisateur actuel ou None
-            password (str): Mot de passe actuel ou None
-            domain (str): Domaine actuel ou None
-            keyring_service (str): Nom du service keyring pour le mot de passe
-            username_key (str): Clé pour stocker le nom d'utilisateur
-            service_name (str): Nom du service
-
-        Returns:
-            tuple: (username, password, domain)
-        """
-
-        # Essayer de récupérer le nom d'utilisateur depuis keyring
-        if not username:
-            try:
-                username = keyring.get_password(service_name, username_key)
-                if username:
-                    logger.debug(f"Nom d'utilisateur récupéré depuis keyring: {username}")
-            except Exception as e:
-                logger.debug(f"Erreur lors de la récupération du nom d'utilisateur depuis keyring: {e}")
-
-        # Essayer de récupérer le mot de passe depuis keyring
-        if username and not password:
-            try:
-                stored_password = keyring.get_password(keyring_service, username)
-                if stored_password:
-                    password = stored_password
-                    logger.debug(f"Mot de passe récupéré depuis keyring pour {username}")
-            except Exception as e:
-                logger.debug(f"Erreur lors de la récupération du mot de passe depuis keyring: {e}")
-
-        return username, password, domain
-
-    def _get_credentials_from_session(self, username, password, domain, keyring_service, auth_type):
-        """
-        Récupère les identifiants depuis la session en cours
-
-        Args:
-            username (str): Nom d'utilisateur actuel ou None
-            password (str): Mot de passe actuel ou None
-            domain (str): Domaine actuel ou None
-            keyring_service (str): Nom du service keyring pour le mot de passe
-            auth_type (str): Type d'authentification (basic, ntlm)
-
-        Returns:
-            tuple: (username, password, domain)
-        """
-        if not username or (not domain and auth_type.lower() == "ntlm"):
-            session_username, session_domain = self._get_current_session_info()
-
-            # Utiliser le nom d'utilisateur de la session si non défini ailleurs
-            if not username and session_username:
-                username = session_username
-                logger.debug(f"Nom d'utilisateur récupéré depuis la session en cours: {username}")
-
-            # Utiliser le domaine de la session si non défini ailleurs et si NTLM est requis
-            if not domain and session_domain and auth_type.lower() == "ntlm":
-                domain = session_domain
-                logger.debug(f"Domaine récupéré depuis la session en cours: {domain}")
-
-        # Vérifier si un mot de passe existe dans keyring pour le nom d'utilisateur de la session
-        if username and not password:
-            try:
-                stored_password = keyring.get_password(keyring_service, username)
-                if stored_password:
-                    password = stored_password
-                    logger.debug(f"Mot de passe récupéré depuis keyring pour {username} (utilisateur de session)")
-            except Exception as e:
-                logger.debug(f"Erreur lors de la récupération du mot de passe depuis keyring: {e}")
-
-        return username, password, domain
-
-    def _get_credentials_interactively(self, username, password, domain, keyring_service, username_key,
-                                       service_name, auth_type):
-        """
-        Demande les identifiants manquants interactivement avec GUI/CLI adaptatif
-
-        Args:
-            username (str|None): Nom d'utilisateur actuel ou None
-            password (str|None): Mot de passe actuel ou None
-            domain (str|None): Domaine actuel ou None
-            keyring_service (str): Nom du service keyring pour le mot de passe
-            username_key (str): Clé pour stocker le nom d'utilisateur
-            service_name (str): Nom du service
-            auth_type (str): Type d'authentification (basic, ntlm)
+        Complète les identifiants depuis le trousseau système.
 
         Returns:
             tuple: (username, password, domain)
         """
         try:
-            logger.info("Identifiants manquants, demande interactive")
+            if not username:
+                username = (keyring.get_password(keyring_service, username_key)
+                            or keyring.get_password(service_name, LEGACY_USERNAME_KEY))
+            if username and not password:
+                password = keyring.get_password(keyring_service, username)
+            if not domain:
+                domain = keyring.get_password(keyring_service, "__domain__")
+        except Exception as exc:
+            logger.debug("Keyring unavailable: %s", exc)
+        return username, password, domain
 
-            # Utiliser le PasswordManager pour la saisie GUI/CLI adaptative
+    def _get_current_session_info(self):
+        """
+        Utilisateur et domaine de la session courante.
+
+        Returns:
+            tuple: (username, domain)
+        """
+        try:
+            username = getpass.getuser()
+        except Exception:
+            username = os.environ.get("USERNAME") or os.environ.get("USER")
+
+        domain = None
+        if platform.system() == "Windows":
+            if username and "\\" in username:
+                domain, username = username.split("\\", 1)
+            else:
+                domain = os.environ.get("USERDOMAIN")
+                computer = os.environ.get("COMPUTERNAME")
+                # Un « domaine » égal au nom du poste est un groupe de travail
+                if domain and computer and domain.upper() == computer.upper():
+                    domain = None
+        else:
+            try:
+                fqdn = socket.getfqdn()
+                if "." in fqdn:
+                    domain = fqdn.split(".", 1)[1]
+            except OSError:
+                pass
+
+        logger.debug("Session info - user: %s, domain: %s", username, domain)
+        return username, domain
+
+    def _get_credentials_from_session(self, username, password, domain, keyring_service, auth_type):
+        """
+        Complète l'utilisateur (et le domaine pour NTLM) depuis la session,
+        puis cherche le mot de passe correspondant dans le trousseau.
+
+        Returns:
+            tuple: (username, password, domain)
+        """
+        ntlm = (auth_type or "").lower() == "ntlm"
+        if not username or (ntlm and not domain):
+            session_user, session_domain = self._get_current_session_info()
+            username = username or session_user
+            if ntlm and not domain:
+                domain = session_domain
+
+        if username and not password:
+            try:
+                password = keyring.get_password(keyring_service, username)
+            except Exception as exc:
+                logger.debug("Keyring unavailable: %s", exc)
+        return username, password, domain
+
+    def _get_credentials_interactively(self, username, password, domain, keyring_service,
+                                       username_key=USERNAME_KEY, service_name="iziproxy",
+                                       auth_type="basic"):
+        """
+        Demande les identifiants (fenêtre graphique ou console) et les
+        enregistre dans le trousseau.
+
+        Returns:
+            tuple: (username, password, domain)
+        """
+        try:
             result = self.password_manager.get_credentials_interactive(
                 existing_username=username,
                 existing_domain=domain,
                 auth_type=auth_type,
-                title="IziProxy - Authentification Proxy"
+                title="IziProxy - Proxy authentication",
             )
+        except Exception as exc:
+            logger.warning("Interactive credential prompt failed: %s", exc)
+            return username, password, domain
 
-            if result:
-                username, password, domain = result
+        if not result or not result[0] or not result[1]:
+            logger.info("Credential prompt cancelled")
+            return username, password, domain
 
-                # Stocker dans keyring si on a obtenu des credentials valides
-                if username and password:
-                    self._store_credentials_in_keyring(username, password, domain, keyring_service,
-                                                       username_key, service_name)
-            else:
-                logger.info("Saisie annulée par l'utilisateur")
-
-        except Exception as e:
-            logger.warning(f"Erreur lors de la demande interactive d'identifiants: {e}")
-
+        username, password, domain = result
+        self._store_credentials_in_keyring(username, password, domain, keyring_service,
+                                           username_key, service_name)
         return username, password, domain
 
     def _store_credentials_in_keyring(self, username, password, domain, keyring_service,
-                                      username_key, service_name):
-        """
-        Stocke les identifiants dans le keyring
-
-        Args:
-            username (str): Nom d'utilisateur à stocker
-            password (str): Mot de passe à stocker
-            domain (str): Domaine (non stocké dans keyring)
-            keyring_service (str): Nom du service keyring pour le mot de passe
-            username_key (str): Clé pour stocker le nom d'utilisateur
-            service_name (str): Nom du service
-        """
+                                      username_key=USERNAME_KEY, service_name="iziproxy"):
+        """Enregistre les identifiants dans le trousseau système."""
         if not username or not password:
             return
-
         try:
-            # Stocker le mot de passe
             keyring.set_password(keyring_service, username, password)
+            keyring.set_password(keyring_service, username_key, username)
+            if domain:
+                keyring.set_password(keyring_service, "__domain__", domain)
+            logger.debug("Credentials stored in keyring for %s", username)
+        except Exception as exc:
+            logger.debug("Cannot store credentials in keyring: %s", exc)
 
-            # Stocker également le nom d'utilisateur
-            keyring.set_password(service_name, username_key, username)
-
-            logger.debug(f"Identifiants stockés dans keyring pour {username}")
-        except Exception as e:
-            logger.debug(f"Impossible de stocker les identifiants dans keyring: {e}")
-
-    def get_credentials(self, env_type, service_name="iziproxy"):
+    def delete_credentials(self, env_type, auth_type=None, service_name="iziproxy"):
         """
-        Obtient les identifiants pour un environnement donné
+        Supprime les identifiants enregistrés pour un environnement.
 
         Args:
-            env_type: Type d'environnement
-            service_name: Nom du service pour le stockage des identifiants
+            env_type (str): Environnement
+            auth_type (str): Type d'authentification (celui de la configuration par défaut)
+        """
+        auth_type = (auth_type or self.get_environment_config(env_type).get("auth_type") or "basic").lower()
+        service = self._keyring_service(service_name, env_type, auth_type)
+        try:
+            username = keyring.get_password(service, USERNAME_KEY)
+            for key in filter(None, (username, USERNAME_KEY, "__domain__")):
+                try:
+                    keyring.delete_password(service, key)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+            logger.info("Stored credentials removed for %s", service)
+        except Exception as exc:
+            logger.debug("Cannot remove credentials from keyring: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    # Point d'entrée
+    # ------------------------------------------------------------------ #
+    def get_credentials(self, env_type, service_name="iziproxy", auth_required=None,
+                        auth_type=None, prompt=True):
+        """
+        Recherche les identifiants du proxy.
+
+        Ordre : variables d'environnement / .env, trousseau, session
+        courante, puis saisie interactive (si prompt).
+
+        Args:
+            env_type (str): Environnement
+            service_name (str): Préfixe des entrées du trousseau
+            auth_required (bool): Forcer la recherche (None : valeur de requires_auth)
+            auth_type (str): 'basic' ou 'ntlm' (None : valeur de la configuration)
+            prompt (bool): Autoriser la saisie interactive
 
         Returns:
-            tuple: (username, password, domain)
+            tuple: (username, SecurePassword|None, domain)
         """
-        # Vérifier si l'authentification est requise
         env_config = self.get_environment_config(env_type)
-        if not env_config.get("requires_auth", False):
+        if auth_required is None:
+            auth_required = bool(env_config.get("requires_auth"))
+        if not auth_required:
             return None, None, None
-        else:
-            auth_type = env_config.get("auth_type", "basic")
 
-        # Initialisation des variables
-        username = None
-        password = None
-        domain = None
-        store_method = "keyring"  # Valeur par défaut
-        prompt_on_missing = True  # Valeur par défaut
+        auth_type = (auth_type or env_config.get("auth_type") or "basic").lower()
+        service = self._keyring_service(service_name, env_type, auth_type)
 
-        # Variables d'environnement - Priorité 1
-        username, password, domain = self._get_credentials_from_env_vars(username, password, domain)
+        def result(user, pwd, dom):
+            return user, (SecurePassword(pwd) if pwd else None), dom
 
-        # Si les identifiants sont complets, les retourner
+        username, password, domain = self._get_credentials_from_env_vars(None, None, None)
         if username and password:
-            return username, SecurePassword(password), domain
+            return result(username, password, domain)
 
-        # Keyring - Priorité 2
-        if store_method == "keyring":
-            keyring_service = f"{service_name}_{env_type}-{auth_type}"
-            username_key = "username"
-            username, password, domain = self._get_credentials_from_keyring(
-                username, password, domain, keyring_service, username_key, service_name)
-
-        # Si les identifiants sont complets, les retourner
+        username, password, domain = self._get_credentials_from_keyring(
+            username, password, domain, service, USERNAME_KEY, service_name)
         if username and password:
-            return username, SecurePassword(password), domain
+            return result(username, password, domain)
 
-        # Session en cours - Priorité 3
         username, password, domain = self._get_credentials_from_session(
-            username, password, domain, f"{service_name}_{env_type}-{auth_type}", auth_type)
-
-        # Si les identifiants sont complets, les retourner
+            username, password, domain, service, auth_type)
         if username and password:
-            return username, SecurePassword(password), domain
+            return result(username, password, domain)
 
-        # Demande interactive - Priorité 4 (seulement si prompt_on_missing est True)
-        if prompt_on_missing:
-            keyring_service = f"{service_name}_{env_type}-{auth_type}"
-            username_key = "username"
+        if prompt:
             username, password, domain = self._get_credentials_interactively(
-                username, password, domain, keyring_service, username_key, service_name, auth_type)
+                username, password, domain, service, USERNAME_KEY, service_name, auth_type)
 
-        # Retourner les identifiants (complets ou non)
-        if username and password:
-            return username, SecurePassword(password), domain
-        else:
-            return username, password, domain
+        return result(username, password, domain)

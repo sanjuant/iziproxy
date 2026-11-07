@@ -1,176 +1,85 @@
 Configuration
 =============
 
-IziProxy offre plusieurs façons de le configurer pour répondre à vos besoins spécifiques.
+Aucune configuration n'est nécessaire. Elle permet de forcer un
+comportement par environnement.
 
-Configuration par code
----------------------
+Paramètres du constructeur
+--------------------------
 
-Le moyen le plus direct de configurer IziProxy est via les paramètres du constructeur :
+=================  ==============================================================
+Paramètre          Rôle
+=================  ==============================================================
+``config_path``    Fichier YAML à utiliser
+``proxy_url``      Proxy explicite (prioritaire sur toute détection)
+``pac_url``        Fichier PAC (URL http/https/file ou chemin local)
+``environment``    Environnement forcé (``local``, ``dev``, ``prod``)
+``username``       Utilisateur du proxy
+``password``       Mot de passe du proxy
+``domain``         Domaine NTLM
+``auth_type``      ``basic`` ou ``ntlm`` (détecté sinon)
+``no_proxy``       Exclusions supplémentaires (chaîne ou liste)
+``interactive``    ``False`` pour ne jamais demander d'identifiants
+``debug``          Journaux détaillés sur stderr
+=================  ==============================================================
 
-.. code-block:: python
+Fichier YAML
+------------
 
-   from iziproxy import IziProxy
-   
-   proxy = IziProxy(
-       proxy_url="http://proxy.example.com:8080",  # URL du proxy (prioritaire)
-       pac_url="http://internal.example.com/proxy.pac",  # URL du fichier PAC
-       environment="prod",  # Forcer un environnement spécifique
-       username="user",  # Nom d'utilisateur pour l'authentification
-       password="pass",  # Mot de passe pour l'authentification
-       domain="DOMAIN",  # Domaine pour l'authentification NTLM
-       debug=True  # Activer les logs détaillés
-   )
+Emplacements recherchés : ``./iziproxy.yml``, ``./iziproxy.yaml``,
+``~/.config/iziproxy.yml``, ``~/.config/iziproxy.yaml``, ``~/.iziproxy.yml``,
+``~/.iziproxy.yaml``.
 
-Tous les paramètres sont optionnels. Si vous ne spécifiez pas de proxy_url, IziProxy tentera de détecter automatiquement la configuration de proxy appropriée.
+.. literalinclude:: ../../examples/config_example.yml
+   :language: yaml
 
-Configuration par fichier YAML
+Clés par environnement :
+
+* ``proxy_url`` : proxy explicite
+* ``pac_url`` : fichier PAC
+* ``requires_auth`` : ``true``, ``false`` ou absent (détection par sondage)
+* ``auth_type`` : ``basic`` ou ``ntlm`` (absent : choisi d'après ``Proxy-Authenticate``)
+* ``no_proxy`` : exclusions propres à l'environnement
+
+Exclusions
+----------
+
+Formats acceptés (séparés par virgules, points-virgules ou espaces) :
+
+* ``example.com`` ou ``.example.com`` : le domaine et ses sous-domaines
+* ``*.example.com``, ``10.*``, ``intra*`` : jokers
+* ``10.0.0.0/8`` : réseau CIDR
+* ``host:8080`` : hôte et port
+* ``<local>`` : noms sans point (format Windows)
+* ``*`` : tout
+
+``localhost``, ``127.0.0.0/8`` et ``::1`` sont toujours contactés directement.
+
+Détection de l'environnement
 ----------------------------
 
-Pour une configuration plus flexible et réutilisable, vous pouvez utiliser un fichier YAML :
+Méthode ``auto`` : variables d'environnement, puis nom d'hôte, puis IP, puis
+``local``.
 
-.. code-block:: python
+Variables lues : ``IZIPROXY_ENV``, ``PROXY_ENV``, ``APP_ENV``,
+``ENVIRONMENT``, ``ENVIRONMENT_TYPE``, ``DEPLOY_ENV``, ``STAGE`` (et
+``env_var_name``). Les valeurs reconnues sont des alias explicites
+(``production``, ``prd`` → ``prod`` ; ``staging``, ``qa``, ``uat``,
+``recette`` → ``dev``...). La variable ``ENV`` n'est pas lue : les shells
+l'utilisent pour désigner un fichier.
 
-   proxy = IziProxy(config_path="/chemin/vers/config.yml")
+Identifiants
+------------
 
-Le fichier de configuration YAML doit être structuré comme suit :
+Ordre de recherche :
 
-.. code-block:: yaml
+1. ``username`` / ``password`` du constructeur
+2. Identifiants présents dans l'URL du proxy
+3. Variables ``IZI_USERNAME``, ``IZI_PASSWORD``, ``IZI_DOMAIN`` (ou ``PROXY_*``)
+4. Fichier ``.env`` (``./.env``, ``~/.config/.env``, ``~/.env``)
+5. Trousseau système (service ``iziproxy_<env>-<auth_type>``)
+6. NTLM sous Windows : session courante (aucune saisie)
+7. Saisie interactive (fenêtre Windows, tkinter ou console), puis
+   enregistrement dans le trousseau
 
-   # Configuration des environnements
-   environments:
-     local:
-       proxy_url: null  # Pas de proxy pour l'environnement local
-       requires_auth: false
-     
-     dev:
-       proxy_url: "http://dev-proxy.example.com:8080"
-       requires_auth: true
-       auth_type: "basic"  # Authentification basique
-     
-     prod:
-       proxy_url: "http://prod-proxy.example.com:8080"
-       requires_auth: true
-       auth_type: "ntlm"  # Authentification NTLM
-   
-   # Configuration de la détection d'environnement
-   environment_detection:
-     method: "auto"  # auto, env_var, hostname, ip, ask
-     
-     # Patterns pour la détection par nom d'hôte
-     hostname_patterns:
-       local: ["local", "laptop", "desktop", "dev-pc"]
-       dev: ["dev", "staging", "test", "preprod"]
-       prod: ["prod", "production"]
-     
-     # Expressions régulières pour la détection par nom d'hôte
-     hostname_regex:
-       local: ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"]
-       dev: ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"]
-       prod: ["^prod\\d*-", "^production\\d*-"]
-     
-     # Plages IP pour la détection par adresse IP
-     ip_ranges:
-       local: ["192.168.0.0/24", "127.0.0.1-127.0.0.255"]
-       dev: ["10.0.0.0/16"]
-       prod: ["172.16.0.0/16"]
-   
-   # Configuration de la détection de proxy système
-   system_proxy:
-     use_system_proxy: true  # Utiliser le proxy système si pas de proxy explicite
-     detect_pac: true  # Détecter et utiliser les fichiers PAC
-
-Emplacement du fichier de configuration
---------------------------------------
-
-Si vous ne spécifiez pas de chemin de configuration, IziProxy recherchera automatiquement un fichier ``iziproxy.yml`` ou ``iziproxy.yaml`` dans les emplacements suivants (dans cet ordre) :
-
-1. Le répertoire courant : ``./iziproxy.yml``
-2. Le répertoire de configuration utilisateur : ``~/.config/iziproxy.yml``
-3. Le répertoire personnel de l'utilisateur : ``~/.iziproxy.yml``
-
-Configuration via variables d'environnement et fichier .env
------------------------------------------
-
-Pour des raisons de sécurité, les identifiants (nom d'utilisateur, mot de passe, domaine) doivent être configurés via des variables d'environnement ou un fichier .env plutôt que dans le fichier de configuration YAML.
-
-1. Variables d'environnement
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-IziProxy recherche les variables d'environnement suivantes (en majuscules et minuscules) :
-
-* Format recommandé :
-  * ``IZI_USERNAME`` - Nom d'utilisateur pour l'authentification proxy
-  * ``IZI_PASSWORD`` - Mot de passe pour l'authentification proxy
-  * ``IZI_DOMAIN`` - Domaine pour l'authentification NTLM
-
-* Format alternatif (rétrocompatibilité) :
-  * ``PROXY_USERNAME`` - Nom d'utilisateur pour l'authentification proxy
-  * ``PROXY_PASSWORD`` - Mot de passe pour l'authentification proxy
-  * ``PROXY_DOMAIN`` - Domaine pour l'authentification NTLM
-
-Autres variables d'environnement supportées :
-
-* ``IZIPROXY_ENV`` ou ``ENV`` - Pour forcer un environnement spécifique (``local``, ``dev``, ``prod``)
-* Les variables standard de proxy : ``HTTP_PROXY``, ``HTTPS_PROXY``, ``NO_PROXY``
-
-2. Fichier .env
-^^^^^^^^^^^^^
-
-Vous pouvez également définir ces variables dans un fichier ``.env`` :
-
-.. code-block:: bash
-
-    # Identifiants pour l'authentification proxy
-    IZI_USERNAME=mon_utilisateur
-    IZI_PASSWORD=mon_mot_de_passe
-    IZI_DOMAIN=mon_domaine
-
-Le fichier ``.env`` est recherché dans les emplacements suivants (dans cet ordre) :
-
-* Dans le répertoire courant (``./.env``)
-* Dans le répertoire de configuration utilisateur (``~/.config/.env``)
-* Dans le répertoire personnel de l'utilisateur (``~/.env``)
-
-Options de configuration détaillées
----------------------------------
-
-Environnements
-^^^^^^^^^^^^^
-
-IziProxy supporte différents environnements d'exécution, chacun pouvant avoir sa propre configuration de proxy :
-
-* ``local`` - Environnement de développement local (souvent sans proxy)
-* ``dev`` - Environnement de développement/test
-* ``prod`` - Environnement de production
-
-Détection d'environnement
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-IziProxy peut détecter automatiquement l'environnement actuel en utilisant différentes méthodes :
-
-* ``auto`` - Utilise toutes les méthodes dans l'ordre (par défaut)
-* ``env_var`` - Utilise les variables d'environnement
-* ``hostname`` - Détecte en fonction du nom d'hôte de la machine
-* ``ip`` - Détecte en fonction de l'adresse IP
-* ``ask`` - Demande interactivement à l'utilisateur
-
-Authentification
-^^^^^^^^^^^^^^
-
-IziProxy supporte deux types d'authentification proxy :
-
-* ``basic`` - Authentification HTTP basique
-* ``ntlm`` - Authentification NTLM (Windows)
-
-Stockage des identifiants
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-Les identifiants sont gérés selon l'ordre de priorité suivant :
-
-1. Variables d'environnement - Définies dans le système ou via processus parent
-2. Fichier .env - Stockés dans un fichier séparé non inclus dans le contrôle de version
-3. Trousseau système (keyring) - Stockage sécurisé intégré au système d'exploitation
-4. Demande interactive - Si aucune des méthodes ci-dessus n'a fourni les identifiants
-
-Lorsque vous fournissez un mot de passe via une demande interactive ou des variables d'environnement, il est automatiquement enregistré dans le trousseau de clés du système pour les utilisations futures, évitant ainsi d'avoir à le spécifier à chaque fois.
+``credentials.prompt: false`` ou ``interactive=False`` désactive l'étape 7.

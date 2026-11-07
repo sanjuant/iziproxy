@@ -1,16 +1,16 @@
 Contribuer au projet
-==================
+====================
 
 Cette section explique comment contribuer au projet IziProxy.
 
 Installation de l'environnement de développement
-----------------------------------------------
+------------------------------------------------
 
 1. Cloner le dépôt :
 
 .. code-block:: bash
 
-   git clone https://github.com/votrenom/iziproxy.git
+   git clone https://github.com/sanjuant/iziproxy.git
    cd iziproxy
 
 2. Créer et activer un environnement virtuel :
@@ -27,7 +27,7 @@ Installation de l'environnement de développement
    pip install -e ".[dev]"
 
 Exécuter les tests
-----------------
+------------------
 
 Exécuter les tests avec pytest :
 
@@ -42,7 +42,7 @@ Pour vérifier la couverture de code :
    pytest --cov=iziproxy
 
 Style de code
------------
+-------------
 
 Nous utilisons Black pour le formatage du code :
 
@@ -57,7 +57,7 @@ Et Flake8 pour la vérification de la qualité du code :
    flake8 src tests
 
 Soumettre une Pull Request
-------------------------
+--------------------------
 
 1. Créez une branche pour votre contribution :
 
@@ -100,7 +100,7 @@ Soumettre une Pull Request
 8. Créez une Pull Request sur GitHub.
 
 Documentation
------------
+-------------
 
 La documentation est générée avec Sphinx. Pour construire la documentation localement :
 
@@ -131,22 +131,27 @@ Pour les docstrings, nous utilisons le format Google Style :
        return parametre
 
 Structure du projet
------------------
+-------------------
 
 .. code-block:: text
 
    iziproxy/
    ├── src/
    │   └── iziproxy/           # Package principal
-   │       ├── __init__.py     # Exports principaux
-   │       ├── proxy_manager.py # Classe principale IziProxy
-   │       ├── config_manager.py # Gestion de la configuration
-   │       ├── env_detector.py  # Détection d'environnement
-   │       ├── proxy_detector.py # Détection de proxy
-   │       ├── secure_config.py # Classes de sécurité
-   │       ├── ntlm_auth.py    # Support NTLM
-   │       └── logger.py       # Utilitaires de logging
-   ├── tests/                  # Tests unitaires
+   │       ├── __init__.py       # Exports publics
+   │       ├── proxy_manager.py  # Classe IziProxy
+   │       ├── adapters.py       # Adaptateur requests (choix du proxy par requête)
+   │       ├── ntlm_auth.py      # Adaptateur NTLM / Negotiate (pyspnego)
+   │       ├── proxy_detector.py # Proxy système et fichiers PAC
+   │       ├── proxy_utils.py    # Exclusions, URLs, sonde d'authentification, TLS
+   │       ├── config_manager.py # Configuration YAML et identifiants
+   │       ├── password_manager.py # Saisie interactive (Windows, tkinter, console)
+   │       ├── env_detector.py   # Détection de l'environnement
+   │       ├── secure_config.py  # SecurePassword, SecureProxyConfig
+   │       └── logger.py         # Journalisation
+   ├── tests/
+   │   ├── servers.py            # Vrai proxy local (Basic/NTLM) et serveurs HTTP(S)
+   │   └── test_*.py
    ├── docs/                   # Documentation
    ├── examples/               # Exemples d'utilisation
    ├── pyproject.toml          # Configuration de build
@@ -154,8 +159,18 @@ Structure du projet
    ├── README.md               # Documentation principale
    └── LICENSE                 # Licence du projet
 
+Conventions
+-----------
+
+* Code (noms, messages de journal et d'erreur) en anglais.
+* Commentaires et docstrings en français.
+* Les tests ne doivent dépendre ni du réseau externe, ni de la configuration
+  de la machine (``tests/conftest.py`` isole l'environnement, le registre et
+  le trousseau). Préférez les tests d'intégration avec ``tests/servers.py``
+  aux mocks.
+
 Ajouter une nouvelle fonctionnalité
----------------------------------
+-----------------------------------
 
 1. Commencez par créer des tests pour votre fonctionnalité.
 2. Implémentez la fonctionnalité.
@@ -164,7 +179,7 @@ Ajouter une nouvelle fonctionnalité
 5. Mettez à jour le fichier README.md si nécessaire.
 
 Signaler un bug
--------------
+---------------
 
 Signalez les bugs sur le tracker de problèmes GitHub. Incluez :
 
@@ -175,7 +190,7 @@ Signalez les bugs sur le tracker de problèmes GitHub. Incluez :
 5. Tout message d'erreur ou traceback.
 
 Demande de fonctionnalité
------------------------
+-------------------------
 
 Les demandes de fonctionnalités sont les bienvenues ! Pour proposer une nouvelle fonctionnalité :
 

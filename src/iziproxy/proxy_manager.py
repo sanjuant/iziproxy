@@ -1,713 +1,610 @@
 """
-Module principal d'IziProxy pour la gestion intelligente des proxys
+Point d'entrée d'IziProxy : détection de l'environnement, choix du proxy,
+authentification et intégration avec requests.
 """
 
-import logging
 import os
-from urllib.error import HTTPError
-from urllib.parse import urlparse
-from urllib.request import ProxyHandler, build_opener
+import threading
+from urllib.parse import urlsplit
 
 import requests
-import requests.api
 
+from .adapters import IziProxyAdapter
 from .config_manager import ConfigManager
 from .env_detector import EnvironmentDetector
-from .logger import get_logger
+from .logger import enable_debug_logging, disable_debug_logging, get_logger
 from .proxy_detector import ProxyDetector
+from .proxy_utils import (
+    extract_credentials,
+    has_credentials,
+    inject_credentials,
+    no_proxy_for_env,
+    normalize_proxy_url,
+    parse_no_proxy,
+    probe_proxy_auth,
+    should_bypass,
+    strip_credentials,
+)
 from .secure_config import SecurePassword, SecureProxyConfig
+from .ntlm_auth import NtlmProxyAdapter, can_use_current_user, is_ntlm_auth_available
 
-# Configuration du logger
-logger = get_logger("iziproxy", level=logging.WARNING)
+logger = get_logger("iziproxy")
 
-# Vérifier la disponibilité du support NTLM
-try:
-    from .ntlm_auth import NtlmProxyManager, is_ntlm_auth_available
-    NTLM_SUPPORT = is_ntlm_auth_available()
-except ImportError:
-    NTLM_SUPPORT = False
-    logger.debug("Support NTLM non disponible")
+NTLM_SUPPORT = is_ntlm_auth_available()
 
-    # Définir des versions factices pour éviter les erreurs
-    def is_ntlm_auth_available():
-        """Version factice qui retourne toujours False"""
-        return False
+# URL utilisée quand aucune cible n'est précisée (évaluation PAC, sonde)
+DEFAULT_TARGET_URL = "https://www.example.com/"
 
-    class NtlmProxyManager:
-        """Version factice de NtlmProxyManager"""
-        def create_ntlm_proxy_session(self, **kwargs):
-            logger.error("Support NTLM non disponible. Installez: pip install iziproxy[ntlm]")
-            raise ImportError("Support NTLM non disponible")
+_PROXY_ENV_VARS = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")
+
+# Patch de requests actif (un seul à la fois pour tout le processus)
+_PATCH_LOCK = threading.Lock()
+_ACTIVE_PATCH = {"owner": None, "original_init": None}
+
 
 class IziProxy:
     """
-    Gestion intelligente des proxys avec détection automatique 
-    de l'environnement et des configurations
-    
-    Cette classe est le point d'entrée principal d'IziProxy et permet de:
-    - Détecter automatiquement l'environnement d'exécution
-    - Trouver et configurer le proxy approprié
-    - Gérer l'authentification (basique ou NTLM)
-    - Créer des sessions requests préconfigurées
-    - Obtenir des dictionnaires de proxy utilisables
+    Gestion intelligente des proxys d'entreprise.
+
+    - Détecte l'environnement d'exécution (local, dev, prod)
+    - Trouve le proxy : paramètre explicite, configuration, variables
+      d'environnement, paramètres système ou fichier PAC
+    - Respecte les exclusions (no_proxy, ProxyOverride Windows...)
+    - Détecte si le proxy exige une authentification (Basic ou NTLM)
+    - S'intègre à requests (session, dictionnaire, variables d'environnement,
+      patch global)
+
+    Exemple :
+        >>> proxy = IziProxy()
+        >>> session = proxy.create_session()
+        >>> session.get("https://example.com")
     """
 
-    def __init__(self, config_path=None, proxy_url=None, pac_url=None,
-                 environment=None, username=None, password=None, domain=None,
-                 debug=False):
+    def __init__(self, config_path=None, proxy_url=None, pac_url=None, environment=None,
+                 username=None, password=None, domain=None, auth_type=None,
+                 no_proxy=None, interactive=None, debug=False):
         """
-        Initialise IziProxy avec les options spécifiées
-        
         Args:
-            config_path (str, optional): Chemin vers un fichier de configuration YAML
-            proxy_url (str, optional): URL du proxy à utiliser (prioritaire)
-            pac_url (str, optional): URL du fichier PAC à utiliser
-            environment (str, optional): Forcer un environnement ('local', 'dev', 'prod')
-            username (str, optional): Nom d'utilisateur pour l'authentification
-            password (str, optional): Mot de passe pour l'authentification
-            domain (str, optional): Domaine pour l'authentification NTLM
-            debug (bool, optional): Activer le mode débogage
+            config_path (str): Fichier de configuration YAML
+            proxy_url (str): Proxy à utiliser (prioritaire sur toute détection)
+            pac_url (str): Fichier PAC à utiliser (URL ou chemin)
+            environment (str): Forcer l'environnement ('local', 'dev', 'prod')
+            username (str): Nom d'utilisateur du proxy
+            password (str): Mot de passe du proxy
+            domain (str): Domaine NTLM
+            auth_type (str): 'basic' ou 'ntlm' (détecté automatiquement sinon)
+            no_proxy (str|list): Hôtes supplémentaires à contacter sans proxy
+            interactive (bool): Autoriser la saisie des identifiants manquants
+                (None : valeur de la configuration, vrai par défaut)
+            debug (bool): Afficher les journaux détaillés
         """
-        # Configuration du logger
         if debug:
-            logger.setLevel(logging.DEBUG)
-            logger.debug("Mode débogage activé")
+            enable_debug_logging()
 
-        # Stockage des paramètres fournis
-        self.proxy_url_override = proxy_url
+        self.proxy_url_override = normalize_proxy_url(proxy_url)
         self.pac_url_override = pac_url
-        self.env_override = environment
+        self.env_override = environment.lower() if environment else None
         self.username_override = username
         self.password_override = password
         self.domain_override = domain
+        self.auth_type_override = auth_type.lower() if auth_type else None
+        self.no_proxy_override = no_proxy
+        self.interactive = interactive
 
-        # Chargement de la configuration
         self.config_manager = ConfigManager(config_path)
         self.config = self.config_manager.get_config()
-
-        # Initialisation des sous-systèmes
         self.env_detector = EnvironmentDetector(self.config)
         self.proxy_detector = ProxyDetector(self.config.get("system_proxy", {}))
 
-        # Détection de l'environnement
-        if self.env_override:
-            self.current_env = self.env_override
-            logger.info(f"Environnement forcé: {self.current_env}")
-        else:
-            self.current_env = self.env_detector.detect_environment()
+        self.current_env = self.env_override or self.env_detector.detect_environment()
 
-        # Variables d'état
-        self._proxy_config = None
-        self._ntlm_session = None
-        self._proxy_url = None
+        self._lock = threading.RLock()
+        self._settings = None
+        self._auth = None
+        self._credentials = None
+        self._pac_results = {}
+        self._saved_env = None
+        self._warned = set()
 
-        logger.debug(f"IziProxy initialisé (environnement: {self.current_env})")
+        logger.debug("IziProxy initialized (environment: %s)", self.current_env)
 
-    def get_proxy_config(self, url=None, force_refresh=False):
+    def __repr__(self):
+        return f"IziProxy(environment={self.current_env!r}, proxy={self.get_proxy_url()!r})"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.unpatch_requests()
+        self.clear_environment_variables()
+        return False
+
+    # ------------------------------------------------------------------ #
+    # Résolution du proxy
+    # ------------------------------------------------------------------ #
+    def _env_config(self):
+        return self.config_manager.get_environment_config(self.current_env) or {}
+
+    def _warn_once(self, key, message, *args):
+        if key not in self._warned:
+            self._warned.add(key)
+            logger.warning(message, *args)
+
+    def _proxy_settings(self):
         """
-        Obtient la configuration de proxy appropriée
-        
-        Args:
-            url (str, optional): URL cible pour laquelle obtenir la configuration
-            force_refresh (bool, optional): Forcer le rafraîchissement du cache
-            
+        Détermine (une seule fois) la source du proxy.
+
         Returns:
-            SecureProxyConfig: Configuration de proxy à utiliser
+            dict: source ('explicit', 'pac', 'system', 'direct'), http, https,
+                  pac_url, no_proxy (liste)
         """
-        # Utiliser le cache si disponible et non forcé
-        if self._proxy_config is not None and not force_refresh:
-            return self._proxy_config
+        with self._lock:
+            if self._settings is not None:
+                return self._settings
 
-        # Obtenir la configuration selon l'environnement
-        proxy_url = self._determine_proxy_url()
+            env_config = self._env_config()
+            no_proxy = parse_no_proxy(self.no_proxy_override)
+            no_proxy += parse_no_proxy(env_config.get("no_proxy"))
+            no_proxy += parse_no_proxy(self.config.get("no_proxy"))
 
-        if proxy_url:
-            # Utiliser l'URL explicite avec authentification si nécessaire
-            logger.debug(f"Utilisation du proxy explicite: {proxy_url}")
-            proxy_dict = self._create_proxy_dict(proxy_url)
-            
-            # Mise à jour de l'URL du proxy avec l'authentification
-            self._proxy_url = proxy_dict.get('http', proxy_url)
-            
-            self._proxy_config = SecureProxyConfig(proxy_dict)
-        else:
-            # Sinon, détecter automatiquement
-            logger.debug("Détection automatique du proxy système")
+            explicit = self.proxy_url_override or normalize_proxy_url(env_config.get("proxy_url"))
+            pac_url = self.pac_url_override or env_config.get("pac_url")
 
-            # Si PAC URL est spécifié, l'utiliser pour la détection
-            if self.pac_url_override:
-                logger.debug(f"Utilisation du PAC spécifié: {self.pac_url_override}")
-
-                # Utiliser le proxy_detector existant et définir l'URL PAC
-                self.proxy_detector._pac_url = self.pac_url_override
-
-                # Utiliser la méthode de détection PAC existante
-                pac_proxy_dict = self.proxy_detector._detect_pac_file(url)
-
-                if pac_proxy_dict:
-                    logger.debug(f"Proxy détecté via PAC: {pac_proxy_dict}")
-                    self._proxy_config = SecureProxyConfig(pac_proxy_dict)
-                    return self._proxy_config
-
-            # Détecter le proxy système
-            proxy_dict = self.proxy_detector.detect_system_proxy(url)
-
-            if proxy_dict:
-                logger.debug(f"Proxy système détecté: {proxy_dict}")
-                self._proxy_config = SecureProxyConfig(proxy_dict)
+            if explicit:
+                settings = {"source": "explicit", "http": explicit, "https": explicit}
+            elif pac_url:
+                settings = {"source": "pac", "pac_url": pac_url}
             else:
-                logger.debug("Aucun proxy détecté, connexion directe")
-                self._proxy_config = SecureProxyConfig({})
+                system = self.proxy_detector.detect_system_proxy()
+                no_proxy += parse_no_proxy(system.get("no_proxy"))
+                if system.get("http") or system.get("https"):
+                    settings = {
+                        "source": "system",
+                        "http": system.get("http") or system.get("https"),
+                        "https": system.get("https") or system.get("http"),
+                    }
+                elif system.get("pac_url"):
+                    settings = {"source": "pac", "pac_url": system["pac_url"]}
+                else:
+                    settings = {"source": "direct"}
 
-        return self._proxy_config
+            # Supprimer les doublons en gardant l'ordre
+            settings["no_proxy"] = list(dict.fromkeys(no_proxy))
+            self._settings = settings
+            logger.debug("Proxy source: %s", SecureProxyConfig._mask_passwords(
+                {k: v for k, v in settings.items() if isinstance(v, str)}))
+            return settings
 
-    def get_proxy_dict(self, url=None, force_refresh=False):
+    def _raw_proxies(self, url=None):
         """
-        Obtient un dictionnaire de proxy utilisable avec requests
-        
+        Proxys à utiliser pour une URL, sans identifiants ajoutés.
+
+        Returns:
+            dict: {'http': ..., 'https': ...} ou {} pour une connexion directe
+        """
+        settings = self._proxy_settings()
+        if url and should_bypass(url, settings["no_proxy"]):
+            return {}
+
+        source = settings["source"]
+        if source == "direct":
+            return {}
+        if source == "pac":
+            proxy = self._pac_proxy(url or DEFAULT_TARGET_URL, settings["pac_url"])
+            return {"http": proxy, "https": proxy} if proxy else {}
+        return {"http": settings["http"], "https": settings["https"]}
+
+    def _pac_proxy(self, url, pac_url):
+        """Évalue le PAC pour une URL (cache par schéma + hôte + port)."""
+        parts = urlsplit(url)
+        key = (parts.scheme, parts.hostname, parts.port)
+        with self._lock:
+            if key not in self._pac_results:
+                self._pac_results[key] = self.proxy_detector.find_proxy_for_url(url, pac_url)
+            return self._pac_results[key]
+
+    # ------------------------------------------------------------------ #
+    # Authentification
+    # ------------------------------------------------------------------ #
+    def _auth_settings(self):
+        """
+        Détermine (une seule fois) si une authentification est nécessaire et
+        laquelle.
+
+        Ordre : paramètres du constructeur, configuration de l'environnement,
+        puis sondage du proxy (réponse 407 et en-têtes Proxy-Authenticate).
+
+        Returns:
+            dict: {'required': bool, 'type': 'basic'|'ntlm'}
+        """
+        with self._lock:
+            if self._auth is not None:
+                return self._auth
+
+            env_config = self._env_config()
+            required = env_config.get("requires_auth")
+            auth_type = self.auth_type_override or (env_config.get("auth_type") or "").lower() or None
+
+            if required is None and (self.username_override or self.password_override):
+                required = True
+
+            proxies = self._raw_proxies()
+            proxy = proxies.get("https") or proxies.get("http")
+
+            if proxy and has_credentials(proxy):
+                # Identifiants déjà présents dans l'URL du proxy
+                required = True if required is None else required
+                auth_type = auth_type or "basic"
+            elif proxy and (required is None or (required and auth_type is None)):
+                status, schemes = probe_proxy_auth(proxy)
+                logger.debug("Proxy probe %s -> status=%s schemes=%s",
+                             strip_credentials(proxy), status, list(schemes))
+                if required is None:
+                    required = status == 407
+                if required and auth_type is None:
+                    auth_type = self._pick_auth_type(schemes)
+
+            # Sans proxy, aucune authentification n'a de sens
+            self._auth = {"required": bool(required) and bool(proxy), "type": auth_type or "basic"}
+            logger.debug("Authentication settings: %s", self._auth)
+            return self._auth
+
+    @staticmethod
+    def _pick_auth_type(schemes):
+        """Choisit le type d'authentification parmi les schémas proposés."""
+        windows_auth = "ntlm" in schemes or "negotiate" in schemes
+        if windows_auth and (NTLM_SUPPORT or "basic" not in schemes):
+            return "ntlm"
+        return "basic"
+
+    def _uses_ntlm(self):
+        """Indique si l'adaptateur NTLM doit être utilisé."""
+        auth = self._auth_settings()
+        if not (auth["required"] and auth["type"] == "ntlm"):
+            return False
+        if not NTLM_SUPPORT:
+            self._warn_once("ntlm", "The proxy requires NTLM but pyspnego is not installed: "
+                                    "pip install iziproxy[ntlm]. Falling back to Basic authentication.")
+            return False
+        return True
+
+    def _get_credentials(self):
+        """
+        Identifiants du proxy (mis en cache après la première recherche).
+
+        Returns:
+            tuple: (username, SecurePassword|None, domain)
+        """
+        with self._lock:
+            if self._credentials is not None:
+                return self._credentials
+
+            proxies = self._raw_proxies()
+            proxy = proxies.get("https") or proxies.get("http")
+            auth_type = self._auth_settings()["type"]
+
+            if self.username_override or self.password_override:
+                username = self.username_override
+                password = self.password_override
+                domain = self.domain_override
+            elif proxy and has_credentials(proxy):
+                username, password = extract_credentials(proxy)
+                domain = self.domain_override
+            else:
+                # Sous Windows, NTLM peut utiliser la session courante : ne pas demander
+                sspi = auth_type == "ntlm" and NTLM_SUPPORT and can_use_current_user()
+                prompt = self.interactive
+                if prompt is None:
+                    prompt = self.config.get("credentials", {}).get("prompt", True)
+                username, password, domain = self.config_manager.get_credentials(
+                    self.current_env,
+                    auth_required=True,
+                    auth_type=auth_type,
+                    prompt=bool(prompt) and not sspi,
+                )
+                if sspi and not password:
+                    logger.debug("No stored password: using the current Windows session for NTLM")
+                    username, password = None, None
+                domain = self.domain_override or domain
+
+            if password is not None and not isinstance(password, SecurePassword):
+                password = SecurePassword(password) if password != "" else None
+            self._credentials = (username or None, password, domain or None)
+            return self._credentials
+
+    def _create_ntlm_adapter(self, **kwargs):
+        """Crée l'adaptateur NTLM avec les identifiants courants."""
+        username, password, domain = self._get_credentials()
+        return NtlmProxyAdapter(resolver=self._raw_proxies, username=username,
+                                password=password, domain=domain, **kwargs)
+
+    def _resolve(self, url=None):
+        """
+        Proxys à utiliser pour une URL, identifiants Basic inclus.
+
+        Returns:
+            dict: {'http': ..., 'https': ...} ou {}
+        """
+        proxies = self._raw_proxies(url)
+        if not proxies:
+            return {}
+        auth = self._auth_settings()
+        if not auth["required"] or self._uses_ntlm():
+            return proxies
+
+        username, password, _ = self._get_credentials()
+        if not username:
+            self._warn_once("nocreds", "The proxy requires authentication but no credentials were found")
+            return proxies
+        secret = password.get_password() if password else None
+        return {
+            scheme: value if has_credentials(value) else inject_credentials(value, username, secret)
+            for scheme, value in proxies.items()
+        }
+
+    # ------------------------------------------------------------------ #
+    # API publique : informations
+    # ------------------------------------------------------------------ #
+    @property
+    def environment(self):
+        """Environnement courant ('local', 'dev', 'prod')."""
+        return self.current_env
+
+    def get_current_environment(self):
+        """Retourne l'environnement courant."""
+        return self.current_env
+
+    def get_proxy_url(self, url=None):
+        """
+        URL du proxy (sans identifiants) utilisée pour une URL cible.
+
         Args:
-            url (str, optional): URL cible pour laquelle obtenir la configuration
-            force_refresh (bool, optional): Forcer le rafraîchissement du cache
-            
-        Returns:
-            dict: Dictionnaire de proxy {'http': '...', 'https': '...'}
-        """
-        config = self.get_proxy_config(url, force_refresh)
-        return config.get_real_config()
-
-    def get_proxy_host(self):
-        """
-        Récupère le nom d'hôte du proxy actuellement configuré
+            url (str): URL cible (https://www.example.com par défaut)
 
         Returns:
-            str: Nom d'hôte du proxy ou None si aucun proxy n'est configuré
+            str|None: URL du proxy, None pour une connexion directe
         """
-        # S'assurer que la configuration est à jour
-        self.get_proxy_config()
+        target = url or DEFAULT_TARGET_URL
+        proxies = self._raw_proxies(target)
+        scheme = urlsplit(target).scheme or "https"
+        return strip_credentials(proxies.get(scheme) or proxies.get("https") or proxies.get("http"))
 
-        if not self._proxy_url:
+    def get_proxy_host(self, url=None):
+        """Nom d'hôte du proxy, ou None."""
+        proxy = self.get_proxy_url(url)
+        return urlsplit(proxy).hostname if proxy else None
+
+    def get_proxy_port(self, url=None):
+        """Port du proxy (port par défaut du schéma si absent), ou None."""
+        proxy = self.get_proxy_url(url)
+        if not proxy:
             return None
+        parts = urlsplit(proxy)
+        return parts.port or (443 if parts.scheme == "https" else 80)
 
-        parsed = urlparse(self._proxy_url)
-        return parsed.hostname
-
-    def get_proxy_port(self):
+    def get_proxy_dict(self, url=None):
         """
-        Récupère le port du proxy actuellement configuré
+        Dictionnaire de proxys utilisable avec requests (paramètre proxies=).
+
+        Les identifiants Basic sont inclus dans les URLs. Un proxy NTLM ne
+        peut pas être décrit par un dictionnaire : utilisez create_session().
+
+        Args:
+            url (str): URL cible (prise en compte des exclusions et du PAC)
 
         Returns:
-            int: Port du proxy ou None si aucun proxy n'est configuré
+            dict: {'http': ..., 'https': ..., 'no_proxy': ...} ou {}
         """
-        # S'assurer que la configuration est à jour
-        config = self.get_proxy_config()
+        proxies = self._resolve(url)
+        no_proxy = self._proxy_settings()["no_proxy"]
+        if proxies and no_proxy:
+            proxies = dict(proxies, no_proxy=",".join(no_proxy))
+        return proxies
 
-        if not self._proxy_url:
-            return None
+    def get_proxy_config(self, url=None):
+        """
+        Version sécurisée de get_proxy_dict() (mots de passe masqués à l'affichage).
 
-        parsed = urlparse(self._proxy_url)
-        # Retourner le port spécifié ou le port par défaut selon le schéma
-        if parsed.port:
-            return parsed.port
-        elif parsed.scheme == 'https':
-            return 443
-        else:
-            return 80  # http par défaut
+        Returns:
+            SecureProxyConfig: Configuration ; get_real_config() donne les URLs réelles
+        """
+        return SecureProxyConfig(self.get_proxy_dict(url))
 
+    @property
+    def requires_auth(self):
+        """True si le proxy exige une authentification."""
+        return self._auth_settings()["required"]
+
+    @property
+    def auth_type(self):
+        """Type d'authentification utilisé ('basic' ou 'ntlm')."""
+        return self._auth_settings()["type"]
+
+    def get_credentials(self):
+        """
+        Identifiants utilisés pour le proxy.
+
+        Returns:
+            tuple: (username, SecurePassword|None, domain) ; (None, None, None)
+                   si aucune authentification n'est nécessaire
+        """
+        if not self._auth_settings()["required"]:
+            return None, None, None
+        return self._get_credentials()
+
+    # ------------------------------------------------------------------ #
+    # API publique : intégration
+    # ------------------------------------------------------------------ #
     def configure_session(self, session):
         """
-        Configure une session requests avec le proxy approprié
-        
+        Configure une session requests existante.
+
+        Le proxy est choisi à chaque requête (exclusions, PAC) par un
+        adaptateur dédié ; les réglages de nouvelles tentatives existants
+        sont conservés.
+
         Args:
-            session (requests.Session): Session requests à configurer
-            
+            session (requests.Session): Session à configurer
+
         Returns:
-            requests.Session: Session configurée
+            requests.Session: La même session
         """
-        # Vérifier si l'authentification NTLM est requise
-        if self._is_ntlm_required():
-            if not NTLM_SUPPORT:
-                logger.warning("Authentification NTLM requise mais non disponible")
-                logger.warning("Installer: pip install iziproxy[ntlm]")
-                # Essayer de configurer normalement
-                session.proxies = self.get_proxy_dict()
-            else:
-                # Configurer une session NTLM
-                self._configure_ntlm_session(session)
-        else:
-            # Configuration standard
-            proxy_config = self.get_proxy_config()
-            session.proxies = proxy_config.get_real_config()
+        current = session.get_adapter("https://")
+        max_retries = getattr(current, "max_retries", 0)
+        adapter = IziProxyAdapter(self, max_retries=max_retries)
 
-            # Ajouter l'authentification basique si nécessaire
-            self._add_basic_auth_if_needed(session)
-
-        # Désactiver la confiance dans les variables d'environnement
-        # pour éviter des interférences
-        session.trust_env = False
-
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.iziproxy = self
         return session
 
     def create_session(self):
         """
-        Crée une nouvelle session requests configurée avec le proxy approprié
-        
+        Crée une session requests configurée.
+
         Returns:
-            requests.Session: Nouvelle session configurée
+            requests.Session: Nouvelle session
         """
-        session = requests.Session()
-        return self.configure_session(session)
+        return self.configure_session(requests.Session())
 
     def set_environment_variables(self):
         """
-        Configure les variables d'environnement avec les paramètres de proxy
-        
-        Cette méthode est utile pour les applications qui n'utilisent pas requests
-        mais respectent les variables d'environnement standard.
-        
+        Définit HTTP(S)_PROXY et NO_PROXY pour les outils qui les lisent
+        (pip, git, curl, urllib...). Les valeurs précédentes sont mémorisées
+        et restaurées par clear_environment_variables().
+
         Returns:
-            dict: Les variables d'environnement définies
+            dict: Variables définies
         """
-        proxy_dict = self.get_proxy_dict()
-        env_vars = {}
-        
-        # Définir les variables d'environnement standard
-        if 'http' in proxy_dict and proxy_dict['http']:
-            os.environ['HTTP_PROXY'] = proxy_dict['http']
-            os.environ['http_proxy'] = proxy_dict['http']
-            env_vars['HTTP_PROXY'] = proxy_dict['http']
-            env_vars['http_proxy'] = proxy_dict['http']
-            
-        if 'https' in proxy_dict and proxy_dict['https']:
-            os.environ['HTTPS_PROXY'] = proxy_dict['https']
-            os.environ['https_proxy'] = proxy_dict['https']
-            env_vars['HTTPS_PROXY'] = proxy_dict['https']
-            env_vars['https_proxy'] = proxy_dict['https']
-            
-        if 'no_proxy' in proxy_dict and proxy_dict['no_proxy']:
-            os.environ['NO_PROXY'] = proxy_dict['no_proxy']
-            os.environ['no_proxy'] = proxy_dict['no_proxy']
-            env_vars['NO_PROXY'] = proxy_dict['no_proxy']
-            env_vars['no_proxy'] = proxy_dict['no_proxy']
-            
-        logger.debug(f"Variables d'environnement proxy définies: {env_vars}")
-        return env_vars
-        
+        if self._uses_ntlm():
+            self._warn_once("ntlm-env", "Environment variables cannot carry NTLM authentication; "
+                                        "tools reading them will not be authenticated")
+        if self._proxy_settings()["source"] == "pac":
+            logger.debug("PAC configuration: environment variables use the proxy for %s", DEFAULT_TARGET_URL)
+
+        proxies = self._resolve()
+        values = {}
+        if proxies.get("http"):
+            values["HTTP_PROXY"] = values["http_proxy"] = proxies["http"]
+        if proxies.get("https"):
+            values["HTTPS_PROXY"] = values["https_proxy"] = proxies["https"]
+        if proxies:
+            values["NO_PROXY"] = values["no_proxy"] = no_proxy_for_env(self._proxy_settings()["no_proxy"])
+
+        if self._saved_env is None:
+            self._saved_env = {name: os.environ.get(name) for name in _PROXY_ENV_VARS}
+        os.environ.update(values)
+        logger.debug("Proxy environment variables set: %s", sorted(values))
+        return values
+
     def clear_environment_variables(self):
-        """
-        Supprime les variables d'environnement de proxy définies précédemment
-        """
-        for var in ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy']:
-            if var in os.environ:
-                del os.environ[var]
-                
-        logger.debug("Variables d'environnement proxy supprimées")
+        """Restaure les variables d'environnement d'avant set_environment_variables()."""
+        if self._saved_env is None:
+            return
+        for name, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self._saved_env = None
+        logger.debug("Proxy environment variables restored")
 
-    def get_current_environment(self):
+    def patch_requests(self):
         """
-        Retourne l'environnement actuellement détecté
-        
+        Configure automatiquement toutes les sessions requests créées ensuite,
+        y compris celles de requests.get() et des bibliothèques tierces.
+
         Returns:
-            str: Environnement ('local', 'dev', 'prod')
+            IziProxy: L'instance (chaînage)
         """
-        return self.current_env
+        with _PATCH_LOCK:
+            if _ACTIVE_PATCH["owner"] is self:
+                return self
+            if _ACTIVE_PATCH["owner"] is not None:
+                _ACTIVE_PATCH["owner"].unpatch_requests()
 
-    def get_credentials(self):
+            original_init = requests.Session.__init__
+            izi = self
+            state = threading.local()
+
+            def patched_init(session, *args, **kwargs):
+                original_init(session, *args, **kwargs)
+                if getattr(state, "busy", False):
+                    return
+                state.busy = True
+                try:
+                    izi.configure_session(session)
+                finally:
+                    state.busy = False
+
+            patched_init.__wrapped__ = original_init
+            requests.Session.__init__ = patched_init
+            _ACTIVE_PATCH.update(owner=self, original_init=original_init)
+        logger.info("requests patched with the IziProxy configuration")
+        return self
+
+    def unpatch_requests(self):
         """
-        Retourne les identifiants de proxy actuels (sécurisés)
-        
+        Annule patch_requests().
+
         Returns:
-            tuple: (username, password, domain)
+            IziProxy: L'instance (chaînage)
         """
-        return self._get_credentials()
+        with _PATCH_LOCK:
+            if _ACTIVE_PATCH["owner"] is not self:
+                return self
+            requests.Session.__init__ = _ACTIVE_PATCH["original_init"]
+            _ACTIVE_PATCH.update(owner=None, original_init=None)
+        logger.info("requests restored")
+        return self
 
+    # ------------------------------------------------------------------ #
+    # API publique : maintenance
+    # ------------------------------------------------------------------ #
     def clear_auth_cache(self):
+        """Oublie le type d'authentification détecté et les identifiants."""
+        with self._lock:
+            self._auth = None
+            self._credentials = None
+
+    def reset_credentials(self):
         """
-        Vide le cache de détection d'authentification
-        Utile quand la configuration proxy change
+        Supprime les identifiants enregistrés dans le trousseau pour
+        l'environnement courant (utile après un changement de mot de passe).
+
+        Returns:
+            IziProxy: L'instance (chaînage)
         """
-        if hasattr(self, '_cache') and 'auth_requirement_cache' in self._cache:
-            del self._cache['auth_requirement_cache']
-            logger.debug("Cache auth requirement vidé")
+        self.config_manager.delete_credentials(self.current_env, auth_type=self.auth_type)
+        self.clear_auth_cache()
+        return self
 
     def refresh(self):
         """
-        Force le rafraîchissement de toutes les détections et caches
-        
-        Returns:
-            IziProxy: Instance actuelle pour chaînage
-        """
-        # Rafraîchir l'environnement détecté
-        if not self.env_override:
-            self.current_env = self.env_detector.detect_environment(force_refresh=True)
-            
-        # Vider les caches
-        self._proxy_config = None
-        self.proxy_detector.clear_cache()
+        Relance toutes les détections (environnement, proxy, authentification).
 
-        # Vider le cache d'auth
-        self.clear_auth_cache()
-        
-        # Redétecter la configuration
-        self.get_proxy_config(force_refresh=True)
-        
-        logger.debug("Rafraîchissement terminé")
+        Returns:
+            IziProxy: L'instance (chaînage)
+        """
+        with self._lock:
+            if not self.env_override:
+                self.current_env = self.env_detector.detect_environment(force_refresh=True)
+            self.proxy_detector.clear_cache()
+            self._settings = None
+            self._pac_results.clear()
+            self.clear_auth_cache()
+        logger.debug("IziProxy refreshed")
         return self
-
-    def _determine_proxy_url(self):
-        """
-        Détermine l'URL du proxy à utiliser en fonction des priorités
-        
-        Returns:
-            str: URL du proxy ou None
-        """
-        # 1. URL de proxy explicite (la plus prioritaire)
-        if self.proxy_url_override:
-            return self.proxy_url_override
-
-        # 2. URL de proxy dans la configuration d'environnement
-        env_config = self.config_manager.get_environment_config(self.current_env)
-        if env_config and "proxy_url" in env_config and env_config["proxy_url"]:
-            return env_config["proxy_url"]
-
-        # 3. Pas d'URL explicite, utiliser la détection automatique
-        return None
-
-    def _create_proxy_dict(self, proxy_url):
-        """
-        Crée un dictionnaire de proxy à partir d'une URL
-        
-        Args:
-            proxy_url (str): URL du proxy
-            
-        Returns:
-            dict: Dictionnaire de proxy {'http': '...', 'https': '...'}
-        """
-        # Vérifier si l'authentification est requise
-        requires_auth = self._requires_authentication()
-
-        # Si authentification requise et pas déjà dans l'URL
-        if requires_auth and '@' not in proxy_url:
-            username, password, _ = self._get_credentials()
-
-            if username and password:
-                # Récupérer le mot de passe réel si c'est un SecurePassword
-                password_str = password.get_password() if isinstance(password, SecurePassword) else password
-
-                # Ajouter l'authentification à l'URL
-                parsed = urlparse(proxy_url)
-                auth_url = f"{parsed.scheme}://{username}:{password_str}@{parsed.netloc}{parsed.path or ''}"
-                logger.debug(f"URL de proxy avec authentification: {auth_url}")
-                proxy_url = auth_url
-
-        # Créer le dictionnaire
-        return {
-            'http': proxy_url,
-            'https': proxy_url
-        }
-
-    def _requires_authentication(self):
-        """
-        Vérifie si l'environnement actuel nécessite une authentification
-        
-        Returns:
-            bool: True si l'authentification est requise
-        """
-        # ÉTAPE 1: Récupérer la configuration explicite
-        env_config = self.config_manager.get_environment_config(self.current_env)
-        explicit_auth_required = env_config.get("requires_auth", None)
-
-        # ÉTAPE 2: Vérifier si configuration explicite existe
-        if explicit_auth_required is not None:
-            logger.debug(f"Auth explicitement configurée: {explicit_auth_required}")
-            return explicit_auth_required
-
-        # ÉTAPE 3: Pas de configuration explicite → test automatique
-        logger.debug("Pas de config auth explicite, test automatique")
-        return self._auto_detect_auth_requirement()
-
-    def _auto_detect_auth_requirement(self):
-        """
-        Détecte automatiquement si le proxy actuel nécessite une authentification
-
-        Returns:
-            bool: True si l'authentification est requise
-        """
-        # Utiliser un cache pour éviter les tests répétés
-        cache_key = "auth_requirement_cache"
-        if hasattr(self, '_cache') and cache_key in self._cache:
-            cached_result = self._cache[cache_key]
-            logger.debug(f"Auth requirement from cache: {cached_result}")
-            return cached_result
-
-        # Initialiser le cache si nécessaire
-        if not hasattr(self, '_cache'):
-            self._cache = {}
-
-        auth_required = False
-
-        try:
-            # Obtenir la configuration proxy actuelle (sans auth)
-            proxy_config = self.proxy_detector.detect_system_proxy()
-
-            if not proxy_config or not (proxy_config.get('http') or proxy_config.get('https')):
-                # Pas de proxy détecté, pas d'auth requise
-                logger.debug("Pas de proxy détecté, pas d'auth requise")
-                auth_required = False
-            else:
-                # Tester le proxy détecté
-                test_proxy_url = proxy_config.get('http') or proxy_config.get('https')
-
-                # S'assurer qu'il n'y a pas déjà d'auth dans l'URL
-                if '@' in test_proxy_url:
-                    logger.debug("Proxy URL contient déjà une auth")
-                    auth_required = True
-                else:
-                    # Test rapide pour voir si auth requise
-                    logger.debug(f"Test auth pour proxy: {test_proxy_url}")
-                    auth_required = self._quick_test_proxy_auth_required(test_proxy_url)
-
-        except Exception as e:
-            logger.debug(f"Erreur lors du test auto auth: {e}")
-            # En cas d'erreur, assumer qu'aucune auth n'est requise
-            auth_required = False
-
-        # Mettre en cache le résultat
-        self._cache[cache_key] = auth_required
-        logger.debug(f"Auth requirement detected: {auth_required}")
-
-        return auth_required
-
-    def _is_ntlm_required(self):
-        """
-        Vérifie si l'authentification NTLM est requise
-        
-        Returns:
-            bool: True si l'authentification NTLM est requise
-        """
-        env_config = self.config_manager.get_environment_config(self.current_env)
-        return env_config.get("auth_type", "").lower() == "ntlm"
-
-    def _get_credentials(self):
-        """
-        Obtient les identifiants pour l'authentification proxy
-        
-        Returns:
-            tuple: (username, password, domain)
-        """
-        # Vérifier si des identifiants ont été fournis explicitement
-        if self.username_override:
-            password = self.password_override or ""
-            if not isinstance(password, SecurePassword) and password:
-                password = SecurePassword(password)
-            domain = self.domain_override or ""
-            return self.username_override, password, domain
-
-        # Sinon, utiliser le gestionnaire de configuration
-        return self.config_manager.get_credentials(self.current_env, "iziproxy")
-
-    def _add_basic_auth_if_needed(self, session):
-        """
-        Ajoute l'authentification basique à une session si nécessaire
-        
-        Args:
-            session (requests.Session): Session requests à configurer
-        """
-        if not self._requires_authentication():
-            return
-
-        # Ne pas ajouter si déjà dans l'URL de proxy
-        proxy_config = session.proxies
-        if any('@' in url for url in proxy_config.values() if url):
-            return
-
-        # Obtenir les identifiants
-        username, password, _ = self._get_credentials()
-
-        if username and password:
-            from requests.auth import HTTPProxyAuth
-            if isinstance(password, SecurePassword):
-                password = password.get_password()
-            session.auth = HTTPProxyAuth(username, password)
-
-    def _configure_ntlm_session(self, session):
-        """
-        Configure une session avec l'authentification NTLM
-        
-        Args:
-            session (requests.Session): Session requests à configurer
-        """
-        if not NTLM_SUPPORT:
-            logger.error("Support NTLM non disponible")
-            return
-
-        # Obtenir les informations du proxy
-        proxy_url = self._determine_proxy_url()
-        if not proxy_url:
-            # Essayer de détecter automatiquement
-            proxy_config = self.proxy_detector.detect_system_proxy()
-            http_proxy = proxy_config.get('http', '')
-            if http_proxy:
-                proxy_url = http_proxy
-
-        if not proxy_url:
-            logger.error("Impossible de déterminer l'URL du proxy pour NTLM")
-            return
-
-        # Parser l'URL
-        parsed = urlparse(proxy_url)
-        proxy_host = parsed.hostname
-        proxy_port = parsed.port or 8080
-
-        # Obtenir les identifiants
-        username, password, domain = self._get_credentials()
-
-        if not username:
-            logger.error("Nom d'utilisateur manquant pour l'authentification NTLM")
-            return
-
-        # Si le mot de passe est un SecurePassword, récupérer sa valeur réelle
-        if isinstance(password, SecurePassword):
-            password_str = password.get_password()
-        else:
-            password_str = password or ""
-
-        # Créer le gestionnaire NTLM
-        try:
-            ntlm_manager = NtlmProxyManager()
-
-            # Créer une nouvelle session NTLM
-            ntlm_session = ntlm_manager.create_ntlm_proxy_session(
-                proxy_host=proxy_host,
-                proxy_port=proxy_port,
-                username=username,
-                password=password_str,
-                domain=domain or '',
-                debug=logger.level <= logging.DEBUG
-            )
-
-            # Copier les attributs importants vers la session fournie
-            session.mount('https://', ntlm_session.adapters['https://'])
-            session.mount('http://', ntlm_session.adapters['http://'])
-            session.proxies = {}
-            session.trust_env = False
-
-            logger.debug(f"Session NTLM configurée pour {username}@{proxy_host}:{proxy_port}")
-
-            # Stocker la session NTLM pour référence
-            self._ntlm_session = ntlm_session
-
-        except Exception as e:
-            logger.error(f"Erreur lors de la configuration NTLM: {e}")
-            # Fallback à la configuration standard
-            session.proxies = self.get_proxy_dict()
-
-    def _quick_test_proxy_auth_required(self, proxy_url, timeout=3):
-        """
-        Test rapide pour vérifier si un proxy nécessite une authentification
-
-        Args:
-            proxy_url (str): URL du proxy à tester
-            timeout (int): Timeout en secondes
-
-        Returns:
-            bool: True si authentification requise, False sinon
-        """
-        try:
-            # Extraire l'host et port du proxy
-            parsed = urlparse(proxy_url)
-            proxy_address = f"{parsed.hostname}:{parsed.port or 8080}"
-
-            # Test avec urllib (plus rapide que requests)
-            proxy_handler = ProxyHandler({
-                'http': f"http://{proxy_address}",
-                'https': f"http://{proxy_address}"
-            })
-            opener = build_opener(proxy_handler)
-
-            # Faire une requête de test simple
-            response = opener.open('http://httpbin.org/ip', timeout=timeout)
-
-            # Si on arrive ici sans exception, pas d'auth requise
-            logger.debug(f"Proxy {proxy_address} ne nécessite pas d'auth")
-            return False
-
-        except HTTPError as e:
-            if e.code == 407:
-                # Authentification proxy requise
-                logger.debug(f"Proxy {proxy_address} nécessite une authentification (407)")
-                return True
-            else:
-                # Autre erreur HTTP, assumer pas d'auth requise
-                logger.debug(f"Proxy {proxy_address} erreur {e.code}, assume pas d'auth")
-                return False
-
-        except Exception as e:
-            # Erreur de connexion ou autre, assumer pas d'auth requise
-            logger.debug(f"Proxy {proxy_address} erreur connexion: {e}, assume pas d'auth")
-            return False
 
     def set_debug(self, enabled=True):
         """
-        Active ou désactive le mode débogage
-        
-        Args:
-            enabled (bool): True pour activer le débogage, False pour le désactiver
-            
+        Active ou désactive les journaux détaillés.
+
         Returns:
-            IziProxy: Instance actuelle pour chaînage
+            IziProxy: L'instance (chaînage)
         """
         if enabled:
-            logger.setLevel(logging.DEBUG)
+            enable_debug_logging()
         else:
-            logger.setLevel(logging.WARNING)
-
-        logger.debug(f"Mode débogage {'activé' if enabled else 'désactivé'}")
-        return self
-        
-    def patch_requests(self):
-        """
-        Remplace les méthodes du module requests par celles de la session préconfigurée
-        
-        Cette méthode effectue un "monkey patching" du module requests
-        pour que toutes les requêtes utilisent automatiquement la configuration proxy.
-        
-        Utile pour les applications existantes ou les bibliothèques tierces
-        qui utilisent requests.get(), requests.post(), etc. directement.
-        
-        Returns:
-            IziProxy: Instance actuelle pour chaînage
-        """
-        # Créer une session préconfigurée si nécessaire
-        if not hasattr(self, '_patched_session'):
-            self._patched_session = self.create_session()
-        
-        # Remplacer les méthodes du module requests
-        requests.get = self._patched_session.get
-        requests.post = self._patched_session.post
-        requests.put = self._patched_session.put
-        requests.delete = self._patched_session.delete
-        requests.head = self._patched_session.head
-        requests.options = self._patched_session.options
-        requests.patch = self._patched_session.patch
-        
-        logger.info("Module requests patché avec la configuration proxy")
-        return self
-        
-    def unpatch_requests(self):
-        """
-        Restaure les méthodes originales du module requests
-        
-        Returns:
-            IziProxy: Instance actuelle pour chaînage
-        """
-        # Restaurer les méthodes originales
-        requests.get = requests.api.get
-        requests.post = requests.api.post
-        requests.put = requests.api.put
-        requests.delete = requests.api.delete
-        requests.head = requests.api.head
-        requests.options = requests.api.options
-        requests.patch = requests.api.patch
-        
-        logger.info("Module requests restauré à son état original")
+            disable_debug_logging()
         return self

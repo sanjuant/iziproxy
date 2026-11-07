@@ -1,77 +1,52 @@
 Référence de l'API
-================
-
-Cette section décrit l'API publique d'IziProxy.
+==================
 
 Classe principale
----------------
+-----------------
 
 .. autoclass:: iziproxy.IziProxy
    :members:
-   :undoc-members:
-   :show-inheritance:
+   :special-members: __enter__, __exit__
+
+Exceptions
+----------
+
+.. autoexception:: iziproxy.NtlmAuthenticationError
 
 Classes de support
-----------------
+------------------
 
-SecurePassword
-^^^^^^^^^^^^^
-
-.. autoclass:: iziproxy.secure_config.SecurePassword
+.. autoclass:: iziproxy.SecurePassword
    :members:
-   :undoc-members:
-   :show-inheritance:
 
-SecureProxyConfig
-^^^^^^^^^^^^^^^^
-
-.. autoclass:: iziproxy.secure_config.SecureProxyConfig
+.. autoclass:: iziproxy.SecureProxyConfig
    :members:
-   :undoc-members:
-   :show-inheritance:
 
 Modules internes
---------------
+----------------
 
-Les modules suivants sont utilisés en interne par IziProxy et ne font pas partie de l'API publique. 
-Ils sont documentés ici pour référence.
+Ces modules ne font pas partie de l'API publique et peuvent évoluer.
 
-Module env_detector
-^^^^^^^^^^^^^^^^^
-
-.. automodule:: iziproxy.env_detector
+.. automodule:: iziproxy.adapters
    :members:
-   :undoc-members:
-   :show-inheritance:
-
-Module proxy_detector
-^^^^^^^^^^^^^^^^^^^
-
-.. automodule:: iziproxy.proxy_detector
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-Module config_manager
-^^^^^^^^^^^^^^^^^^^
-
-.. automodule:: iziproxy.config_manager
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-Module ntlm_auth
-^^^^^^^^^^^^^^
 
 .. automodule:: iziproxy.ntlm_auth
    :members:
-   :undoc-members:
-   :show-inheritance:
 
-Module logger
-^^^^^^^^^^^
+.. automodule:: iziproxy.proxy_detector
+   :members:
+
+.. automodule:: iziproxy.proxy_utils
+   :members:
+
+.. automodule:: iziproxy.config_manager
+   :members:
+
+.. automodule:: iziproxy.env_detector
+   :members:
+
+.. automodule:: iziproxy.password_manager
+   :members:
 
 .. automodule:: iziproxy.logger
    :members:
-   :undoc-members:
-   :show-inheritance:

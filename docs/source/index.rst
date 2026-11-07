@@ -1,5 +1,5 @@
 Documentation d'IziProxy
-====================
+========================
 
 .. image:: https://img.shields.io/pypi/v/iziproxy.svg
    :target: https://pypi.org/project/iziproxy/
@@ -9,7 +9,7 @@ Documentation d'IziProxy
    :target: https://pypi.org/project/iziproxy/
    :alt: Python versions
 
-.. image:: https://img.shields.io/github/license/votrenom/iziproxy.svg
+.. image:: https://img.shields.io/github/license/sanjuant/iziproxy.svg
    :target: https://github.com/sanjuant/iziproxy/blob/master/LICENSE
    :alt: License
 
@@ -26,7 +26,7 @@ Fonctionnalités principales
 * 🛠️ API simple et intuitive
 
 Installation
------------
+------------
 
 .. code-block:: bash
 
@@ -80,7 +80,7 @@ Contenu
    contributing
 
 Indices et tables
-----------------
+-----------------
 
 * :ref:`genindex`
 * :ref:`modindex`

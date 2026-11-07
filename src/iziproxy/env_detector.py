@@ -1,338 +1,218 @@
 """
-Module de détection automatique de l'environnement d'exécution
+Détection de l'environnement d'exécution (local, dev, prod).
 """
 
+import ipaddress
+import logging
 import os
 import re
 import socket
-import logging
-import platform
+import sys
 
-# Configuration du logger
 logger = logging.getLogger("iziproxy")
+
+# Valeurs reconnues dans les variables d'environnement
+ENV_ALIASES = {
+    "local": "local", "localhost": "local", "workstation": "local", "laptop": "local",
+    "dev": "dev", "develop": "dev", "development": "dev", "staging": "dev", "stage": "dev",
+    "test": "dev", "testing": "dev", "qa": "dev", "uat": "dev", "preprod": "dev",
+    "pre-prod": "dev", "recette": "dev", "int": "dev", "integration": "dev",
+    "prod": "prod", "production": "prod", "prd": "prod", "live": "prod",
+}
+
+
+def normalize_environment(value):
+    """
+    Convertit une valeur libre ('Production', 'staging'...) en type d'environnement.
+
+    Returns:
+        str|None: 'local', 'dev', 'prod' ou None si non reconnu
+    """
+    if not value:
+        return None
+    return ENV_ALIASES.get(str(value).strip().lower())
 
 
 class EnvironmentDetector:
     """
-    Détecte automatiquement l'environnement d'exécution (local, dev, prod)
-    
-    Cette classe permet de:
-    - Identifier l'environnement d'exécution actuel
-    - Utiliser différentes méthodes de détection
-    - Personnaliser les règles de détection
+    Détecte l'environnement courant.
+
+    Méthodes (configuration « environment_detection.method ») :
+    - env_var : variables IZIPROXY_ENV, APP_ENV, ENVIRONMENT...
+    - hostname : motifs et expressions régulières sur le nom d'hôte
+    - ip : plages d'adresses IP
+    - ask : question posée à l'utilisateur
+    - auto : env_var, puis hostname, puis ip
     """
 
     ENV_TYPES = ["local", "dev", "prod"]
-    ENV_VAR_NAMES = ["ENVIRONMENT", "ENV", "APP_ENV", "ENVIRONMENT_TYPE", "PROXY_ENV", "IZIPROXY_ENV"]
+    # IZIPROXY_ENV est prioritaire ; ENV seul est ignoré (utilisé par sh pour un fichier)
+    ENV_VAR_NAMES = ["IZIPROXY_ENV", "PROXY_ENV", "APP_ENV", "ENVIRONMENT", "ENVIRONMENT_TYPE",
+                     "DEPLOY_ENV", "STAGE"]
 
     def __init__(self, config=None):
         """
-        Initialise le détecteur d'environnement
-        
         Args:
-            config (dict, optional): Configuration avec des règles de détection personnalisées
+            config (dict): Configuration complète d'IziProxy
         """
         self.config = config or {}
         self.detection_cache = None
         self.system_info = self._get_system_info()
 
+    @property
+    def _detection_config(self):
+        return self.config.get("environment_detection") or {}
+
     def detect_environment(self, force_refresh=False):
         """
-        Détecte l'environnement actuel en utilisant différentes méthodes
-        
-        Args:
-            force_refresh (bool): Force le rafraîchissement du cache
-            
         Returns:
-            str: Type d'environnement détecté ('local', 'dev', 'prod')
+            str: 'local', 'dev' ou 'prod' ('local' par défaut)
         """
-        # Utiliser le cache si disponible et pas de rafraîchissement forcé
         if self.detection_cache and not force_refresh:
             return self.detection_cache
 
-        # Déterminer la méthode de détection
         method = self._get_detection_method()
+        detected = None
+        if method in ("env_var", "auto"):
+            detected = self._detect_by_env_var()
+        if not detected and method in ("hostname", "auto"):
+            detected = self._detect_by_hostname()
+        if not detected and method in ("ip", "auto"):
+            detected = self._detect_by_ip()
+        if not detected and method == "ask":
+            detected = self._ask_user()
 
-        detected_env = None
+        if not detected:
+            logger.debug("Environment not detected, defaulting to 'local'")
+            detected = "local"
 
-        # Appliquer les méthodes de détection dans l'ordre
-        if method == "env_var" or method == "auto":
-            detected_env = self._detect_by_env_var()
+        self.detection_cache = detected
+        logger.info("Environment detected: %s", detected)
+        return detected
 
-        if not detected_env and (method == "hostname" or method == "auto"):
-            detected_env = self._detect_by_hostname()
-
-        if not detected_env and (method == "ip" or method == "auto"):
-            detected_env = self._detect_by_ip()
-
-        if not detected_env and method == "ask":
-            detected_env = self._ask_user()
-
-        # Par défaut, considérer comme environnement local
-        if not detected_env:
-            logger.info("Environnement non détecté, utilisation de 'local' par défaut")
-            detected_env = "local"
-
-        # Mettre en cache le résultat
-        self.detection_cache = detected_env
-
-        logger.info(f"Environnement détecté: {detected_env}")
-        return detected_env
+    @staticmethod
+    def _get_local_ip():
+        """
+        Adresse IP de l'interface utilisée pour sortir (aucun paquet n'est envoyé).
+        """
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("10.255.255.255", 1))
+                ip = sock.getsockname()[0]
+                if not ip.startswith("0."):
+                    return ip
+        except OSError:
+            pass
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return None
 
     def _get_system_info(self):
-        """
-        Collecte les informations système pour faciliter la détection
-        
-        Returns:
-            dict: Informations système
-        """
-        info = {
-            "hostname": socket.gethostname().lower(),
-            "os": platform.system().lower(),
-            "ip": None,
-        }
-        
-        # Tenter d'obtenir l'adresse IP locale
-        try:
-            info["ip"] = socket.gethostbyname(socket.gethostname())
-        except:
-            pass
-            
-        return info
+        """Nom d'hôte et adresse IP locale."""
+        return {"hostname": socket.gethostname().lower(), "ip": self._get_local_ip()}
 
     def _get_detection_method(self):
-        """
-        Détermine la méthode de détection à utiliser
-        
-        Returns:
-            str: Méthode de détection ("auto", "env_var", "hostname", "ip", "ask")
-        """
-        if "environment_detection" in self.config:
-            detection_config = self.config["environment_detection"]
-            if "method" in detection_config:
-                return detection_config["method"].lower()
-
-        return "auto"
+        method = self._detection_config.get("method") or "auto"
+        return str(method).lower()
 
     def _detect_by_env_var(self):
-        """
-        Détecte l'environnement via les variables d'environnement
-        
-        Returns:
-            str: Type d'environnement détecté ou None
-        """
-        # Vérifier d'abord la variable spécifique à IziProxy
-        if "IZIPROXY_ENV" in os.environ:
-            env_value = os.environ["IZIPROXY_ENV"].lower()
-            if env_value in self.ENV_TYPES:
-                logger.debug(f"Environnement détecté via IZIPROXY_ENV: {env_value}")
-                return env_value
-        
-        # Vérifier les autres variables d'environnement
-        for var_name in self.ENV_VAR_NAMES:
-            if var_name in os.environ:
-                env_value = os.environ[var_name].lower()
-
-                # Correspondance directe avec un type d'environnement
-                if env_value in self.ENV_TYPES:
-                    logger.debug(f"Environnement détecté via variable {var_name}: {env_value}")
-                    return env_value
-
-                # Recherche partielle (ex: "production" -> "prod")
-                for env_type in self.ENV_TYPES:
-                    if env_type in env_value or env_value in env_type:
-                        logger.debug(f"Correspondance partielle via {var_name}: {env_value} -> {env_type}")
-                        return env_type
-
+        """Lit le type d'environnement dans les variables d'environnement."""
+        names = list(self.ENV_VAR_NAMES)
+        custom = self._detection_config.get("env_var_name")
+        if custom:
+            names.insert(0, custom)
+        for name in names:
+            value = os.environ.get(name)
+            env = normalize_environment(value)
+            if env:
+                logger.debug("Environment detected from %s=%s", name, value)
+                return env
         return None
 
     def _detect_by_hostname(self):
-        """
-        Détecte l'environnement via le nom d'hôte de la machine
-        
-        Returns:
-            str: Type d'environnement détecté ou None
-        """
+        """Compare le nom d'hôte aux motifs (sous-chaînes) puis aux regex."""
         hostname = self.system_info["hostname"]
-        logger.debug(f"Détection par hostname: {hostname}")
 
-        # Vérifier les motifs de nom d'hôte dans la configuration
-        patterns = self._get_hostname_patterns()
-        for env_type, host_patterns in patterns.items():
-            for pattern in host_patterns:
-                if pattern.lower() in hostname:
-                    logger.debug(f"Environnement détecté via hostname pattern: {pattern} -> {env_type}")
+        for env_type, patterns in self._get_hostname_patterns().items():
+            for pattern in patterns:
+                if pattern and str(pattern).lower() in hostname:
+                    logger.debug("Environment detected from hostname pattern %r", pattern)
                     return env_type
 
-        # Vérifier les regex de nom d'hôte
-        regex_patterns = self._get_hostname_regex()
-        for env_type, regex_list in regex_patterns.items():
-            for regex in regex_list:
+        for env_type, expressions in self._get_hostname_regex().items():
+            for expression in expressions:
                 try:
-                    if re.search(regex, hostname, re.IGNORECASE):
-                        logger.debug(f"Environnement détecté via hostname regex: {regex} -> {env_type}")
+                    if re.search(expression, hostname, re.IGNORECASE):
+                        logger.debug("Environment detected from hostname regex %r", expression)
                         return env_type
                 except re.error:
-                    logger.warning(f"Expression régulière invalide: {regex}")
-
-        # Recherche basique par mots clés connus
-        if any(word in hostname for word in ["prod", "production"]):
-            return "prod"
-        elif any(word in hostname for word in ["dev", "development", "staging", "test"]):
-            return "dev"
-        elif any(word in hostname for word in ["local", "laptop", "desktop", "pc-"]):
-            return "local"
-
+                    logger.warning("Invalid hostname regex: %s", expression)
         return None
 
     def _detect_by_ip(self):
-        """
-        Détecte l'environnement via l'adresse IP
-        
-        Returns:
-            str: Type d'environnement détecté ou None
-        """
-        # Récupérer les plages d'IP configurées
-        ip_ranges = self._get_ip_ranges()
-        if not ip_ranges:
-            return None
-
-        # Obtenir l'IP locale
+        """Cherche l'adresse IP locale dans les plages configurées."""
         ip = self.system_info["ip"]
         if not ip:
             return None
-
-        # Vérifier dans quelle plage se trouve l'IP
-        for env_type, ip_range_list in ip_ranges.items():
-            for ip_range in ip_range_list:
-                try:
-                    if self._ip_in_range(ip, ip_range):
-                        logger.debug(f"Environnement détecté via IP range: {ip} in {ip_range} -> {env_type}")
-                        return env_type
-                except Exception as e:
-                    logger.debug(f"Erreur lors de la vérification de la plage IP {ip_range}: {e}")
-
+        for env_type, ranges in self._get_ip_ranges().items():
+            for ip_range in ranges or []:
+                if self._ip_in_range(ip, ip_range):
+                    logger.debug("Environment detected from IP %s in %s", ip, ip_range)
+                    return env_type
         return None
 
     def _ask_user(self):
-        """
-        Demande l'environnement à l'utilisateur
-        
-        Returns:
-            str: Type d'environnement choisi
-        """
+        """Pose la question en console (si un terminal est disponible)."""
+        if not (sys.stdin and sys.stdin.isatty()):
+            return None
         try:
-            print("\nIziProxy ne peut pas détecter automatiquement l'environnement.")
-            print("Veuillez sélectionner votre environnement:")
-            print("1. Local (développement local)")
-            print("2. Dev (environnement de développement/staging)")
-            print("3. Prod (environnement de production)")
+            print("IziProxy could not detect the environment.", file=sys.stderr)
+            print("  1. local\n  2. dev\n  3. prod", file=sys.stderr)
+            choice = input("Your choice (1/2/3): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return {"1": "local", "2": "dev", "3": "prod"}.get(choice) or normalize_environment(choice)
 
-            choice = input("Votre choix (1/2/3): ")
-
-            if choice == "1":
-                return "local"
-            elif choice == "2":
-                return "dev"
-            elif choice == "3":
-                return "prod"
-            else:
-                print("Choix non valide, utilisation de 'local' par défaut")
-                return "local"
-        except:
-            # En cas d'erreur (par exemple, exécution sans terminal), utiliser local
-            return "local"
+    def _merged(self, key, defaults):
+        """Motifs par défaut complétés par ceux de la configuration."""
+        merged = {env: list(values) for env, values in defaults.items()}
+        configured = self._detection_config.get(key) or {}
+        for env_type in self.ENV_TYPES:
+            for value in configured.get(env_type) or []:
+                if value not in merged[env_type]:
+                    merged[env_type].append(value)
+        return merged
 
     def _get_hostname_patterns(self):
-        """
-        Récupère les motifs de nom d'hôte depuis la configuration
-        
-        Returns:
-            dict: Motifs de nom d'hôte par type d'environnement
-        """
-        default_patterns = {
+        return self._merged("hostname_patterns", {
             "local": ["local", "laptop", "desktop", "dev-pc"],
             "dev": ["dev", "staging", "test", "preprod"],
-            "prod": ["prod", "production"]
-        }
-
-        if "environment_detection" in self.config and "hostname_patterns" in self.config["environment_detection"]:
-            configured = self.config["environment_detection"]["hostname_patterns"]
-            # Fusionner avec les valeurs par défaut
-            for env_type in self.ENV_TYPES:
-                if env_type in configured:
-                    default_patterns[env_type].extend(configured[env_type])
-
-        return default_patterns
+            "prod": ["prod", "production"],
+        })
 
     def _get_hostname_regex(self):
-        """
-        Récupère les expressions régulières de nom d'hôte depuis la configuration
-        
-        Returns:
-            dict: Regex de nom d'hôte par type d'environnement
-        """
-        default_regex = {
+        return self._merged("hostname_regex", {
             "local": ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"],
             "dev": ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"],
-            "prod": ["^prod\\d*-", "^production\\d*-"]
-        }
-
-        if "environment_detection" in self.config and "hostname_regex" in self.config["environment_detection"]:
-            configured = self.config["environment_detection"]["hostname_regex"]
-            # Fusionner avec les valeurs par défaut
-            for env_type in self.ENV_TYPES:
-                if env_type in configured:
-                    default_regex[env_type].extend(configured[env_type])
-
-        return default_regex
+            "prod": ["^prod\\d*-", "^production\\d*-"],
+        })
 
     def _get_ip_ranges(self):
-        """
-        Récupère les plages IP depuis la configuration
-        
-        Returns:
-            dict: Plages IP par type d'environnement
-        """
-        if "environment_detection" in self.config and "ip_ranges" in self.config["environment_detection"]:
-            return self.config["environment_detection"]["ip_ranges"]
-
-        return {}
+        return self._detection_config.get("ip_ranges") or {}
 
     @staticmethod
     def _ip_in_range(ip, ip_range):
         """
-        Vérifie si une IP est dans une plage donnée (CIDR ou plage simple)
-        
-        Args:
-            ip (str): Adresse IP à vérifier
-            ip_range (str): Plage IP (format CIDR "192.168.1.0/24" ou plage "192.168.1.0-192.168.1.255")
-            
-        Returns:
-            bool: True si l'IP est dans la plage
+        Vérifie si une IP appartient à une plage CIDR ("10.0.0.0/8") ou
+        début-fin ("10.0.0.1-10.0.0.50").
         """
         try:
-            if "/" in ip_range:  # Format CIDR
-                from ipaddress import ip_network, ip_address
-                return ip_address(ip) in ip_network(ip_range, strict=False)
-            elif "-" in ip_range:  # Format plage
-                start, end = ip_range.split("-")
-                return EnvironmentDetector._ip_to_int(start) <= EnvironmentDetector._ip_to_int(ip) <= EnvironmentDetector._ip_to_int(end)
-        except Exception as e:
-            logger.debug(f"Erreur lors de la vérification de plage IP: {e}")
+            address = ipaddress.ip_address(ip)
+            ip_range = str(ip_range).strip()
+            if "-" in ip_range:
+                start, end = (ipaddress.ip_address(p.strip()) for p in ip_range.split("-", 1))
+                return start <= address <= end
+            return address in ipaddress.ip_network(ip_range, strict=False)
+        except ValueError:
             return False
-
-        return False
-
-    @staticmethod
-    def _ip_to_int(ip):
-        """
-        Convertit une adresse IP en entier pour faciliter les comparaisons
-        
-        Args:
-            ip (str): Adresse IP au format string
-            
-        Returns:
-            int: Représentation entière de l'adresse IP
-        """
-        return sum(int(octet) << (24 - 8 * i) for i, octet in enumerate(ip.split('.')))

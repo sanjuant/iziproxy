@@ -18,7 +18,12 @@ copyright = f'{datetime.datetime.now().year}, IziProxy Contributors'
 author = 'IziProxy Contributors'
 
 # The full version, including alpha/beta/rc tags
-release = '0.1.0'
+try:
+    from importlib.metadata import version as _version
+
+    release = _version("iziproxy")
+except Exception:
+    release = "0.7.0"
 
 # -- General configuration ---------------------------------------------------
 extensions = [

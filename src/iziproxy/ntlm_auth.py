@@ -1,680 +1,488 @@
 """
-Module d'authentification NTLM pour IziProxy
+Authentification NTLM / Negotiate auprès des proxys d'entreprise.
+
+Le protocole NTLM authentifie une *connexion* et non une requête : la
+négociation (type 1 -> challenge type 2 -> type 3) doit avoir lieu sur le
+même socket. Cet adaptateur ouvre donc lui-même la connexion vers le proxy,
+réalise la négociation, puis laisse http.client / urllib3 lire la réponse
+afin de bénéficier du même comportement que requests (en-têtes insensibles
+à la casse, cookies, redirections, streaming, décompression...).
+
+Les jetons sont produits par pyspnego, qui :
+
+- embarque sa propre implémentation de MD4 (OpenSSL 3 ne la fournit plus) ;
+- sous Windows, utilise SSPI et peut donc s'authentifier avec la session
+  Windows courante sans connaître le mot de passe.
 """
 
-import gzip
-import io
-import ssl
-import socket
 import base64
+import http.client
 import logging
+import platform
+import socket
+import ssl
+from urllib.parse import urlsplit
+
 import requests
-from urllib.parse import urlparse
-from urllib3.connection import HTTPSConnection
-from urllib3.connectionpool import HTTPSConnectionPool
+from requests.adapters import HTTPAdapter
+from requests.exceptions import (
+    ConnectTimeout,
+    ProxyError,
+    ReadTimeout,
+    SSLError,
+)
+from requests.utils import select_proxy
+from urllib3.response import HTTPResponse
 
-from iziproxy.secure_config import SecurePassword
+try:  # urllib3 >= 1.26 / 2.x
+    from urllib3._collections import HTTPHeaderDict
+except ImportError:  # pragma: no cover
+    from urllib3.response import HTTPHeaderDict
 
-# Configuration du logger
+from .proxy_utils import (
+    build_ssl_context,
+    parse_proxy_authenticate,
+    proxy_host_port,
+    split_timeout,
+)
+from .secure_config import SecurePassword
+
 logger = logging.getLogger("iziproxy")
 
-# Importations conditionnelles pour les dépendances NTLM
 try:
-    from ntlm_auth.ntlm import NtlmContext
+    import spnego
+
     NTLM_AVAILABLE = True
-except ImportError:
-    logger.debug("Package ntlm_auth non disponible, le support NTLM ne sera pas activé")
+except ImportError:  # pragma: no cover - dépend de l'installation
+    spnego = None
     NTLM_AVAILABLE = False
 
-# Essayer d'importer PyCryptodome pour le support MD4/MD5
-try:
-    from Cryptodome.Hash import MD4, MD5
-    CRYPTODOME_AVAILABLE = True
-except ImportError:
-    logger.debug("Package pycryptodomex non disponible, le patch MD4 ne sera pas activé")
-    CRYPTODOME_AVAILABLE = False
+IS_WINDOWS = platform.system() == "Windows"
 
 
 def is_ntlm_auth_available():
     """
-    Vérifie si les dépendances pour l'authentification NTLM sont disponibles
-    
+    Indique si le support NTLM est disponible (paquet pyspnego installé).
+
     Returns:
-        bool: True si les dépendances sont disponibles
+        bool: True si NTLM est utilisable
     """
     return NTLM_AVAILABLE
 
 
+def can_use_current_user():
+    """
+    Indique si l'on peut s'authentifier avec la session Windows courante
+    (SSPI), sans nom d'utilisateur ni mot de passe.
+    """
+    return NTLM_AVAILABLE and IS_WINDOWS
+
+
+class NtlmAuthenticationError(ProxyError):
+    """Le proxy a refusé les identifiants NTLM / Negotiate."""
+
+
+class _SocketCloser:
+    """Objet « connexion » minimal passé à urllib3 pour fermer le socket."""
+
+    def __init__(self, sock):
+        self.sock = sock
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class NtlmProxyAdapter(HTTPAdapter):
+    """
+    Adaptateur requests qui traverse un proxy exigeant NTLM ou Negotiate.
+
+    Les URLs HTTPS passent par un tunnel CONNECT authentifié ; les URLs HTTP
+    sont envoyées au proxy en forme absolue sur une connexion authentifiée.
+    Les hôtes que le résolveur déclare « directs » sont contactés sans proxy.
+    """
+
+    def __init__(self, proxy_url=None, username=None, password=None, domain=None,
+                 workstation=None, resolver=None, **kwargs):
+        """
+        Args:
+            proxy_url (str): URL du proxy (utilisée si aucun résolveur)
+            username (str): Utilisateur ; None pour la session Windows courante
+            password (str|SecurePassword): Mot de passe
+            domain (str): Domaine NTLM
+            workstation (str): Nom du poste (par défaut : nom d'hôte)
+            resolver (callable): url -> dict de proxys ({} = connexion directe)
+        """
+        super().__init__(**kwargs)
+        if not NTLM_AVAILABLE:
+            raise ImportError("NTLM support requires pyspnego: pip install iziproxy[ntlm]")
+        self.proxy_url = proxy_url
+        self.resolver = resolver
+        self.username = username or None
+        if password is not None and not isinstance(password, SecurePassword):
+            password = SecurePassword(password) if password != "" else None
+        self.password = password
+        self.domain = domain or None
+        self.workstation = workstation or socket.gethostname()
+        # Schéma retenu lors de la première négociation (évite une requête de sondage)
+        self._scheme = None
+
+    # ------------------------------------------------------------------ #
+    # Sélection du proxy
+    # ------------------------------------------------------------------ #
+    def _proxy_for(self, url):
+        """Retourne l'URL du proxy à utiliser pour cette URL, ou None (direct)."""
+        if self.resolver is not None:
+            proxies = self.resolver(url) or {}
+            return select_proxy(url, proxies)
+        return self.proxy_url
+
+    # ------------------------------------------------------------------ #
+    # Contexte d'authentification
+    # ------------------------------------------------------------------ #
+    def _qualified_username(self):
+        """Nom d'utilisateur au format DOMAINE\\utilisateur si nécessaire."""
+        user = self.username
+        if user and self.domain and "\\" not in user and "@" not in user:
+            user = f"{self.domain}\\{user}"
+        return user
+
+    def _new_context(self, proxy_host, scheme):
+        """Crée un contexte pyspnego pour le schéma demandé."""
+        password = self.password.get_password() if self.password else None
+        protocol = "negotiate" if scheme == "negotiate" else "ntlm"
+        return spnego.client(
+            self._qualified_username(),
+            password,
+            hostname=proxy_host,
+            service="http",
+            protocol=protocol,
+        )
+
+    @staticmethod
+    def _choose_scheme(offered):
+        """Choisit le schéma à utiliser parmi ceux proposés par le proxy."""
+        if "ntlm" in offered:
+            return "ntlm"
+        if "negotiate" in offered:
+            return "negotiate"
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Entrées / sorties bas niveau
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _read_response(sock, method):
+        """Lit l'en-tête d'une réponse HTTP sur le socket."""
+        response = http.client.HTTPResponse(sock, method=method)
+        response.begin()
+        return response
+
+    @staticmethod
+    def _drain(response):
+        """Consomme le corps d'une réponse intermédiaire (407)."""
+        try:
+            response.read()
+        finally:
+            response.close()
+
+    @staticmethod
+    def _connection_closing(response):
+        """Indique si le proxy va fermer la connexion après cette réponse."""
+        values = " ".join(
+            (response.getheader("Connection") or "", response.getheader("Proxy-Connection") or "")
+        ).lower()
+        return "close" in values
+
+    def _open_socket(self, proxy_host, proxy_port, connect_timeout):
+        try:
+            return socket.create_connection((proxy_host, proxy_port), timeout=connect_timeout)
+        except socket.timeout as exc:
+            raise ConnectTimeout(f"Timed out connecting to proxy {proxy_host}:{proxy_port}") from exc
+        except OSError as exc:
+            raise ProxyError(f"Cannot connect to proxy {proxy_host}:{proxy_port}: {exc}") from exc
+
+    # ------------------------------------------------------------------ #
+    # Négociation
+    # ------------------------------------------------------------------ #
+    def _negotiate(self, proxy_host, proxy_port, connect_timeout, send_leg):
+        """
+        Réalise la négociation NTLM / Negotiate.
+
+        Args:
+            send_leg (callable): (sock, auth_header|None) -> HTTPResponse
+
+        Returns:
+            tuple: (socket, réponse finale non consommée)
+        """
+        sock = self._open_socket(proxy_host, proxy_port, connect_timeout)
+        try:
+            scheme = self._scheme
+            if scheme is None:
+                # Sondage sans authentification pour connaître les schémas proposés
+                response = send_leg(sock, None)
+                if response.status != 407:
+                    return sock, response
+                offered = parse_proxy_authenticate(response.getheaders())
+                closing = self._connection_closing(response)
+                self._drain(response)
+                scheme = self._choose_scheme(offered)
+                if scheme is None:
+                    raise NtlmAuthenticationError(
+                        f"Proxy {proxy_host}:{proxy_port} does not offer NTLM/Negotiate "
+                        f"(offered: {', '.join(offered) or 'none'})"
+                    )
+                if closing:
+                    sock.close()
+                    sock = self._open_socket(proxy_host, proxy_port, connect_timeout)
+
+            header_name = "NTLM" if scheme == "ntlm" else "Negotiate"
+            try:
+                context = self._new_context(proxy_host, scheme)
+                token = context.step()
+            except Exception as exc:
+                raise NtlmAuthenticationError(
+                    f"Cannot build the {header_name} token (missing or invalid credentials?): {exc}"
+                ) from exc
+            response = send_leg(sock, f"{header_name} {base64.b64encode(token).decode('ascii')}")
+
+            rounds = 0
+            while response.status == 407 and rounds < 5:
+                rounds += 1
+                offered = parse_proxy_authenticate(response.getheaders())
+                challenge = offered.get(scheme)
+                closing = self._connection_closing(response)
+                self._drain(response)
+                if not challenge or context.complete:
+                    raise NtlmAuthenticationError(
+                        f"Proxy {proxy_host}:{proxy_port} rejected the {header_name} credentials"
+                    )
+                if closing:
+                    raise NtlmAuthenticationError(
+                        f"Proxy {proxy_host}:{proxy_port} closed the connection during the "
+                        f"{header_name} handshake"
+                    )
+                try:
+                    token = context.step(base64.b64decode(challenge))
+                except Exception as exc:
+                    raise NtlmAuthenticationError(
+                        f"Invalid {header_name} challenge from proxy {proxy_host}:{proxy_port}: {exc}"
+                    ) from exc
+                if not token:
+                    break
+                response = send_leg(sock, f"{header_name} {base64.b64encode(token).decode('ascii')}")
+
+            if response.status == 407:
+                self._drain(response)
+                raise NtlmAuthenticationError(
+                    f"Proxy {proxy_host}:{proxy_port} rejected the {header_name} credentials"
+                )
+
+            self._scheme = scheme
+            return sock, response
+        except Exception:
+            sock.close()
+            raise
+
+    # ------------------------------------------------------------------ #
+    # Construction des requêtes
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _body_bytes(request):
+        """Retourne le corps sous forme d'octets (il peut être rejoué)."""
+        body = request.body
+        if body is None:
+            return b""
+        if isinstance(body, bytes):
+            return body
+        if isinstance(body, str):
+            return body.encode("utf-8")
+        if hasattr(body, "read"):
+            data = body.read()
+            return data.encode("utf-8") if isinstance(data, str) else data
+        # Itérable / générateur (envoi « chunked » dans requests)
+        chunks = []
+        for chunk in body:
+            chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _host_header(parts):
+        host = parts.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        default = 443 if parts.scheme == "https" else 80
+        if parts.port and parts.port != default:
+            host = f"{host}:{parts.port}"
+        return host
+
+    def _serialize(self, request, target, parts, body, extra_headers):
+        """Sérialise une requête HTTP/1.1."""
+        lines = [f"{request.method} {target} HTTP/1.1", f"Host: {self._host_header(parts)}"]
+        skip = {"host", "content-length", "transfer-encoding", "connection",
+                "proxy-connection", "proxy-authorization"}
+        for name, value in request.headers.items():
+            if name.lower() not in skip:
+                lines.append(f"{name}: {value}")
+        if body or request.method.upper() in ("POST", "PUT", "PATCH"):
+            lines.append(f"Content-Length: {len(body)}")
+        for name, value in extra_headers:
+            lines.append(f"{name}: {value}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+
+    # ------------------------------------------------------------------ #
+    # Envoi
+    # ------------------------------------------------------------------ #
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        """Envoie la requête, via le proxy NTLM ou directement selon le résolveur."""
+        proxy_url = self._proxy_for(request.url)
+        if not proxy_url:
+            return super().send(request, stream=stream, timeout=timeout,
+                                verify=verify, cert=cert, proxies={})
+
+        proxy_host, proxy_port = proxy_host_port(proxy_url)
+        connect_timeout, read_timeout = split_timeout(timeout)
+        parts = urlsplit(request.url)
+        method = request.method.upper()
+
+        if parts.scheme == "https":
+            sock, response = self._send_https(request, parts, proxy_host, proxy_port,
+                                              connect_timeout, read_timeout, verify, cert)
+        else:
+            sock, response = self._send_http(request, parts, proxy_host, proxy_port,
+                                             connect_timeout, read_timeout)
+
+        return self._build(request, sock, response, method, stream)
+
+    def _send_https(self, request, parts, proxy_host, proxy_port,
+                    connect_timeout, read_timeout, verify, cert):
+        """Tunnel CONNECT authentifié puis requête chiffrée."""
+        target_port = parts.port or 443
+        authority = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+        authority = f"{authority}:{target_port}"
+
+        def connect_leg(sock, auth_header):
+            lines = [f"CONNECT {authority} HTTP/1.1", f"Host: {authority}",
+                     "Proxy-Connection: Keep-Alive"]
+            if auth_header:
+                lines.append(f"Proxy-Authorization: {auth_header}")
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+            # Méthode CONNECT : pas de corps sur 200, http.client lit le corps des 407
+            return self._read_response(sock, "CONNECT")
+
+        try:
+            sock, response = self._negotiate(proxy_host, proxy_port, connect_timeout, connect_leg)
+        except socket.timeout as exc:
+            raise ConnectTimeout(f"Timed out negotiating with proxy {proxy_host}:{proxy_port}") from exc
+
+        if response.status != 200:
+            status, reason = response.status, response.reason
+            self._drain(response)
+            sock.close()
+            raise ProxyError(f"Tunnel connection failed: {status} {reason}")
+        response.close()
+
+        try:
+            ctx = build_ssl_context(verify, cert)
+            sock.settimeout(connect_timeout)
+            tls = ctx.wrap_socket(sock, server_hostname=parts.hostname)
+        except ssl.SSLError as exc:
+            sock.close()
+            raise SSLError(exc) from exc
+        except socket.timeout as exc:
+            sock.close()
+            raise ConnectTimeout(f"TLS handshake timed out with {parts.hostname}") from exc
+
+        target = parts.path or "/"
+        if parts.query:
+            target += "?" + parts.query
+        body = self._body_bytes(request)
+        payload = self._serialize(request, target, parts, body, [("Connection", "close")])
+        try:
+            tls.settimeout(read_timeout)
+            tls.sendall(payload)
+            return tls, self._read_response(tls, request.method.upper())
+        except socket.timeout as exc:
+            tls.close()
+            raise ReadTimeout(f"Read timed out from {parts.hostname}") from exc
+
+    def _send_http(self, request, parts, proxy_host, proxy_port, connect_timeout, read_timeout):
+        """Requête HTTP en forme absolue sur une connexion proxy authentifiée."""
+        absolute = request.url.split("#", 1)[0]
+        body = self._body_bytes(request)
+
+        def http_leg(sock, auth_header):
+            extra = [("Proxy-Connection", "Keep-Alive"), ("Connection", "Keep-Alive")]
+            if auth_header:
+                extra.append(("Proxy-Authorization", auth_header))
+            sock.sendall(self._serialize(request, absolute, parts, body, extra))
+            return self._read_response(sock, request.method.upper())
+
+        try:
+            sock, response = self._negotiate(proxy_host, proxy_port, connect_timeout, http_leg)
+        except socket.timeout as exc:
+            raise ReadTimeout(f"Read timed out from proxy {proxy_host}:{proxy_port}") from exc
+        sock.settimeout(read_timeout)
+        return sock, response
+
+    def _build(self, request, sock, response, method, stream):
+        """Transforme la réponse http.client en requests.Response."""
+        headers = HTTPHeaderDict()
+        for name, value in response.getheaders():
+            headers.add(name, value)
+
+        raw = HTTPResponse(
+            body=response,
+            headers=headers,
+            status=response.status,
+            version=response.version,
+            reason=response.reason,
+            preload_content=False,
+            decode_content=True,
+            original_response=response,
+            connection=_SocketCloser(sock),
+            request_method=method,
+            request_url=request.url,
+        )
+        result = self.build_response(request, raw)
+        if not stream:
+            try:
+                result.content  # noqa: B018 - force la lecture complète
+            except socket.timeout as exc:
+                raise ReadTimeout(f"Read timed out from {request.url}") from exc
+            finally:
+                raw.close()
+        return result
+
+
 class NtlmProxyManager:
     """
-    Gestionnaire de proxy NTLM pour l'authentification sur les proxys d'entreprise
-    
-    Cette classe simplifie l'utilisation de l'authentification NTLM avec requests
+    Fabrique conservée pour compatibilité : crée une session requests
+    utilisant NtlmProxyAdapter.
     """
 
     def __init__(self):
-        """
-        Initialise le gestionnaire NTLM
-        
-        Raises:
-            ImportError: Si le package ntlm_auth n'est pas disponible
-        """
-        # Vérifier les dépendances
         if not NTLM_AVAILABLE:
-            raise ImportError("Le package ntlm_auth est requis pour utiliser l'authentification NTLM")
+            raise ImportError("NTLM support requires pyspnego: pip install iziproxy[ntlm]")
 
-        # Appliquer le patch MD4 si PyCryptodome est disponible
-        if CRYPTODOME_AVAILABLE:
-            self._patch_ntlm_auth_md4()
-
-    def _patch_ntlm_auth_md4(self):
+    def create_ntlm_proxy_session(self, proxy_host, proxy_port, username=None, password=None,
+                                  domain="", workstation=None, debug=False):
         """
-        Applique un patch pour ntlm_auth afin d'utiliser PyCryptodome pour MD4/MD5
-        
-        Cette méthode remplace l'implémentation hashlib de ntlm_auth par PyCryptodome,
-        qui fournit une implémentation native de MD4 (nécessaire pour NTLM)
-        """
-        try:
-            import ntlm_auth.compute_hash
+        Crée une session requests configurée pour un proxy NTLM.
 
-            # Créer une implémentation de hashlib compatible avec ntlm_auth
-            class FakeHashlib:
-                @staticmethod
-                def new(name, data=b''):
-                    if name.lower() == 'md4':
-                        h = MD4.new()
-                        h.update(data)
-                        return h
-                    elif name.lower() == 'md5':
-                        h = MD5.new()
-                        h.update(data)
-                        return h
-                    else:
-                        raise ValueError(f"Unsupported hash type: {name}")
-
-                @staticmethod
-                def md5(data=b''):
-                    h = MD5.new()
-                    h.update(data)
-                    return h
-
-            # Remplacer l'implémentation hashlib dans ntlm_auth
-            ntlm_auth.compute_hash.hashlib = FakeHashlib
-            logger.debug("Patch MD4/MD5 appliqué avec succès pour ntlm_auth")
-        except Exception as e:
-            logger.warning(f"Erreur lors de l'application du patch MD4: {e}")
-
-    def create_ntlm_proxy_session(self, proxy_host, proxy_port, username, password, domain='', workstation='WORKSTATION', debug=False):
-        """
-        Crée une session requests configurée pour utiliser l'authentification NTLM
-        
-        Args:
-            proxy_host (str): Hôte du proxy
-            proxy_port (int): Port du proxy
-            username (str): Nom d'utilisateur
-            password (str): Mot de passe
-            domain (str, optional): Domaine (optionnel)
-            workstation (str, optional): Nom du poste de travail (optionnel)
-            debug (bool, optional): Activer le mode débogage
-            
         Returns:
-            requests.Session: Session configurée avec l'adaptateur NTLM
+            requests.Session: Session prête à l'emploi
         """
-        session = requests.Session()
         adapter = NtlmProxyAdapter(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
+            proxy_url=f"http://{proxy_host}:{proxy_port}",
             username=username,
             password=password,
             domain=domain,
             workstation=workstation,
-            debug=debug
         )
-        session.mount('https://', adapter)
-        session.mount('http://', adapter)
-        session.proxies = {}
-        session.trust_env = False
-
-        logger.debug(f"Session NTLM créée pour {username}@{proxy_host}:{proxy_port}")
+        session = requests.Session()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         return session
-
-
-class NtlmProxyTunnel:
-    """
-    Établit un tunnel HTTPS à travers un proxy avec authentification NTLM
-    
-    Cette classe gère la création et l'authentification d'un tunnel SSL
-    à travers un proxy NTLM.
-    """
-
-    def __init__(self, proxy_host, proxy_port, username, password, domain='', workstation='WORKSTATION', debug=False):
-        """
-        Initialise le tunnel proxy NTLM
-        
-        Args:
-            proxy_host (str): Hôte du proxy
-            proxy_port (int): Port du proxy
-            username (str): Nom d'utilisateur
-            password (str ou SecurePassword): Mot de passe
-            domain (str, optional): Domaine (optionnel)
-            workstation (str, optional): Nom du poste de travail (optionnel)
-            debug (bool, optional): Activer le mode débogage
-        """
-        self.proxy_host = proxy_host
-        self.proxy_port = proxy_port
-        self.username = username
-        # Assurer que le mot de passe est sécurisé
-        if isinstance(password, SecurePassword):
-            self.password = password
-        else:
-            self.password = SecurePassword(password)
-        self.domain = domain
-        self.workstation = workstation
-        self.debug = debug
-
-    def open_tunnel(self, target_host, target_port=443):
-        """
-        Ouvre un tunnel vers l'hôte cible via le proxy NTLM
-        
-        Args:
-            target_host (str): Hôte de destination
-            target_port (int, optional): Port de destination (443 par défaut)
-            
-        Returns:
-            socket: Socket SSL connecté à la destination
-            
-        Raises:
-            Exception: Si l'établissement du tunnel échoue
-        """
-        if self.debug:
-            logger.debug(f"Connexion au proxy {self.proxy_host}:{self.proxy_port}")
-
-        # Connexion initiale au proxy
-        sock = socket.create_connection((self.proxy_host, self.proxy_port))
-
-        # Création du contexte NTLM
-        context = NtlmContext(
-            username=self.username,
-            password=self.password.get_password(),
-            domain=self.domain,
-            workstation=self.workstation,
-        )
-
-        # Étape 1: Envoi du message NTLM Negotiate
-        negotiate_token = base64.b64encode(context.step()).decode('ascii')
-        self._send_connect(sock, target_host, target_port, negotiate_token)
-
-        # Réception de la réponse du proxy
-        response1 = self._recv_response(sock)
-
-        if b"407" not in response1:
-            # Si le proxy ne demande pas d'authentification, vérifiez si la connexion est établie
-            if b"200 connection established" in response1.lower():
-                if self.debug:
-                    logger.debug("Tunnel établi avec succès sans authentification")
-                return self._wrap_socket(sock, target_host)
-            else:
-                raise Exception("Échec de l'établissement du tunnel proxy sans authentification.")
-
-        # Extraction du challenge NTLM
-        challenge_token = self._parse_ntlm_challenge(response1)
-        if self.debug:
-            logger.debug("Challenge NTLM reçu")
-
-        # Étape 2: Envoi du message NTLM Authenticate
-        authenticate_token = base64.b64encode(context.step(base64.b64decode(challenge_token))).decode('ascii')
-        self._send_connect(sock, target_host, target_port, authenticate_token)
-
-        # Réception de la réponse du proxy
-        response2 = self._recv_response(sock)
-
-        if self.debug:
-            logger.debug("Réponse du proxy après authentification")
-            logger.debug(response2.decode(errors='ignore').strip())
-
-        if b"200 connection established" not in response2.lower():
-            raise Exception("Échec de l'établissement du tunnel proxy après authentification.")
-
-        if self.debug:
-            logger.debug("Tunnel établi avec succès après authentification")
-
-        # Encapsulation SSL de la connexion
-        return self._wrap_socket(sock, target_host)
-
-    def _wrap_socket(self, sock, target_host):
-        """
-        Encapsule la connexion avec SSL et retourne le socket SSL
-        
-        Args:
-            sock (socket): Socket connecté au proxy
-            target_host (str): Nom d'hôte cible pour la vérification SSL
-            
-        Returns:
-            socket: Socket SSL connecté
-        """
-        ssl_context = ssl.create_default_context()
-        return ssl_context.wrap_socket(sock, server_hostname=target_host)
-
-    def _send_connect(self, sock, target_host, target_port, token):
-        """
-        Envoie une requête CONNECT avec l'authentification NTLM
-        
-        Args:
-            sock (socket): Socket connecté au proxy
-            target_host (str): Hôte de destination
-            target_port (int): Port de destination
-            token (str): Token d'authentification NTLM
-        """
-        connect_request = (
-            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
-            f"Host: {target_host}:{target_port}\r\n"
-            f"Proxy-Authorization: NTLM {token}\r\n"
-            f"Proxy-Connection: Keep-Alive\r\n"
-            f"Connection: Keep-Alive\r\n"
-            f"\r\n"
-        )
-        sock.sendall(connect_request.encode('utf-8'))
-
-    def _recv_response(self, sock):
-        """
-        Reçoit une réponse HTTP du proxy
-        
-        Args:
-            sock (socket): Socket connecté au proxy
-            
-        Returns:
-            bytes: Réponse du proxy
-        """
-        buffer = b""
-        while b"\r\n\r\n" not in buffer:
-            data = sock.recv(4096)
-            if not data:
-                break
-            buffer += data
-        return buffer
-
-    def _parse_ntlm_challenge(self, response):
-        """
-        Extrait le challenge NTLM de la réponse du proxy
-        
-        Args:
-            response (bytes): Réponse du proxy
-            
-        Returns:
-            str: Token de challenge NTLM
-            
-        Raises:
-            Exception: Si le challenge NTLM n'est pas trouvé
-        """
-        headers = response.decode(errors='ignore').split('\r\n')
-        for header in headers:
-            if header.lower().startswith('proxy-authenticate:'):
-                header_value = header[len('proxy-authenticate:'):].strip()
-                if header_value.startswith('NTLM'):
-                    return header_value[len('NTLM'):].strip()
-        raise Exception("Challenge NTLM non trouvé dans la réponse du proxy")
-
-
-# Adaptations des classes de connexion pour l'intégration NTLM
-class PatchedHTTPSConnection(HTTPSConnection):
-    """
-    Connexion HTTPS patchée pour utiliser un socket SSL préconnecté
-    
-    Cette classe modifie HTTPSConnection pour utiliser un socket SSL
-    déjà établi par le tunnel NTLM.
-    """
-
-    def __init__(self, host, ssl_sock, port=443, timeout=60):
-        """
-        Initialise la connexion patchée
-        
-        Args:
-            host (str): Hôte de destination
-            ssl_sock (socket): Socket SSL préconnecté
-            port (int, optional): Port de destination
-            timeout (int, optional): Timeout en secondes
-        """
-        super().__init__(host, port=port, timeout=timeout)
-        self.sock = ssl_sock
-        self._custom_connected = True
-
-    def connect(self):
-        """
-        Méthode connect surchargée pour utiliser le socket préconnecté
-        """
-        if getattr(self, '_custom_connected', False):
-            return
-        super().connect()
-
-
-class CustomHTTPSConnectionPool(HTTPSConnectionPool):
-    """
-    Pool de connexions HTTPS personnalisé pour gérer le tunnel NTLM
-    
-    Cette classe étend HTTPSConnectionPool pour créer des connexions
-    à travers un tunnel NTLM.
-    """
-
-    def __init__(self, tunnel, host, port):
-        """
-        Initialise le pool de connexions
-        
-        Args:
-            tunnel (NtlmProxyTunnel): Instance de NtlmProxyTunnel
-            host (str): Hôte de destination
-            port (int): Port de destination
-        """
-        self.tunnel = tunnel
-        super().__init__(host=host, port=port)
-
-    def _new_conn(self):
-        """
-        Crée une nouvelle connexion à travers le tunnel NTLM
-        
-        Returns:
-            PatchedHTTPSConnection: Connexion HTTPS patchée
-        """
-        ssl_sock = self.tunnel.open_tunnel(self.host, self.port)
-        return PatchedHTTPSConnection(self.host, ssl_sock, port=self.port)
-
-
-class NtlmProxyAdapter(requests.adapters.BaseAdapter):
-    """
-    Adaptateur requests pour l'authentification NTLM avec les proxys
-    
-    Cette classe implémente un adaptateur requests personnalisé qui gère
-    l'authentification NTLM pour les proxys d'entreprise.
-    """
-
-    def __init__(self, proxy_host, proxy_port, username, password, domain='', workstation='WORKSTATION', debug=False):
-        """
-        Initialise l'adaptateur NTLM
-        
-        Args:
-            proxy_host (str): Hôte du proxy
-            proxy_port (int): Port du proxy
-            username (str): Nom d'utilisateur
-            password (str): Mot de passe
-            domain (str, optional): Domaine (optionnel)
-            workstation (str, optional): Nom du poste de travail (optionnel)
-            debug (bool, optional): Activer le mode débogage
-        """
-        self.proxy_host = proxy_host
-        self.proxy_port = proxy_port
-        self.username = username
-        self.password = SecurePassword(password)
-        self.domain = domain
-        self.workstation = workstation
-        self.debug = debug
-
-    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
-        """
-        Envoie une requête via le tunnel NTLM
-        
-        Cette méthode établit un tunnel NTLM puis envoie la requête HTTP
-        à travers ce tunnel. Elle gère également la lecture et le traitement
-        de la réponse.
-        
-        Args:
-            request (PreparedRequest): Requête requests à envoyer
-            stream (bool, optional): Activer le streaming
-            timeout (int, optional): Timeout en secondes
-            verify (bool, optional): Vérifier le certificat SSL
-            cert (str, optional): Certificat client
-            proxies (dict, optional): Configurations de proxy (ignorées)
-            
-        Returns:
-            requests.Response: Réponse à la requête
-            
-        Raises:
-            Exception: Si une erreur survient lors de l'envoi de la requête
-        """
-        parsed_url = urlparse(request.url)
-        hostname = parsed_url.hostname
-
-        # Créer le tunnel NTLM
-        tunnel = NtlmProxyTunnel(
-            proxy_host=self.proxy_host,
-            proxy_port=self.proxy_port,
-            username=self.username,
-            password=self.password,
-            domain=self.domain,
-            workstation=self.workstation,
-            debug=self.debug
-        )
-
-        # Créer le pool de connexions et obtenir une connexion
-        pool = CustomHTTPSConnectionPool(tunnel=tunnel, host=hostname, port=443)
-        conn = pool._new_conn()
-
-        # Construire la requête HTTP
-        path = parsed_url.path or '/'
-        if parsed_url.query:
-            path += '?' + parsed_url.query
-
-        request_line = f"{request.method} {path} HTTP/1.1\r\n"
-        headers = ''.join(f"{k}: {v}\r\n" for k, v in request.headers.items())
-        full_request = (request_line +
-                        f"Host: {hostname}\r\n" +
-                        headers +
-                        "\r\n").encode()
-
-        if request.body:
-            full_request += request.body if isinstance(request.body, bytes) else request.body.encode()
-
-        # Envoyer la requête
-        conn.sock.sendall(full_request)
-
-        # Étape 1: Lire les headers
-        response_buffer = b""
-        while b"\r\n\r\n" not in response_buffer:
-            chunk = conn.sock.recv(4096)
-            if not chunk:
-                raise Exception("Connexion fermée avant réception des headers")
-            response_buffer += chunk
-
-        header_data, _, remaining = response_buffer.partition(b"\r\n\r\n")
-
-        # Parser les headers
-        header_lines = header_data.decode(errors='ignore').split("\r\n")
-        status_line = header_lines[0]
-        headers = {}
-
-        for line in header_lines[1:]:
-            if ": " in line:
-                key, value = line.split(": ", 1)
-                headers[key.strip()] = value.strip()
-
-        # Vérifier Content-Length si disponible
-        content_length = None
-        if "Content-Length" in headers:
-            try:
-                content_length = int(headers["Content-Length"])
-            except ValueError:
-                content_length = None
-
-        # Étape 2: Lire le body
-        body_data = remaining
-
-        if content_length is not None:
-            # Lire exactement le nombre d'octets spécifié
-            while len(body_data) < content_length:
-                chunk = conn.sock.recv(content_length - len(body_data))
-                if not chunk:
-                    break
-                body_data += chunk
-        else:
-            # Pas de Content-Length: lire jusqu'à fermeture
-            # Vérifier s'il s'agit d'un transfert chunked
-            is_chunked = headers.get("Transfer-Encoding", "").lower() == "chunked"
-
-            if is_chunked:
-                # Gestion du transfert chunked
-                decoded_body = b""
-                chunk_data = body_data
-
-                while True:
-                    # Si pas de données chunk, lire plus
-                    if not chunk_data:
-                        chunk_data = conn.sock.recv(4096)
-                        if not chunk_data:
-                            break
-
-                    # Trouver la taille du chunk
-                    chunk_size_end = chunk_data.find(b"\r\n")
-                    if chunk_size_end == -1:
-                        # Taille incomplète, lire plus
-                        more_data = conn.sock.recv(4096)
-                        if not more_data:
-                            break
-                        chunk_data += more_data
-                        continue
-
-                    # Extraire la taille du chunk
-                    try:
-                        chunk_size_hex = chunk_data[:chunk_size_end].decode('ascii').strip()
-                        chunk_size = int(chunk_size_hex, 16)
-                    except (ValueError, UnicodeDecodeError):
-                        # Format invalide
-                        break
-
-                    # Si taille zéro, fin du body
-                    if chunk_size == 0:
-                        break
-
-                    # Calculer où le chunk se termine
-                    chunk_end = chunk_size_end + 2 + chunk_size + 2
-
-                    # Si le chunk n'est pas complet, lire plus
-                    while len(chunk_data) < chunk_end:
-                        more_data = conn.sock.recv(4096)
-                        if not more_data:
-                            break
-                        chunk_data += more_data
-
-                    # Extraire le chunk et ajouter au body
-                    chunk_content = chunk_data[chunk_size_end + 2:chunk_size_end + 2 + chunk_size]
-                    decoded_body += chunk_content
-
-                    # Passer au chunk suivant
-                    chunk_data = chunk_data[chunk_end:]
-
-                body_data = decoded_body
-            else:
-                # Transfert standard, lire jusqu'à fermeture
-                while True:
-                    chunk = conn.sock.recv(4096)
-                    if not chunk:
-                        break
-                    body_data += chunk
-
-        # Étape 3: Créer la réponse Requests
-        http_version, status_code, *reason_parts = status_line.split(' ', 2)
-        reason = ' '.join(reason_parts) if reason_parts else ""
-
-        response = requests.Response()
-        response.status_code = int(status_code)
-        response.reason = reason
-        response.headers = headers
-        response._content = body_data
-        response.url = request.url
-        response.request = request
-        response.encoding = requests.utils.get_encoding_from_headers(response.headers)
-
-        # Vérifiez si le contenu est compressé avec gzip
-        if 'Content-Encoding' in headers and headers['Content-Encoding'] == 'gzip':
-            # Utilisez un BytesIO pour décompresser le contenu gzip
-            with gzip.GzipFile(fileobj=io.BytesIO(body_data)) as gzip_file:
-                decompressed_data = gzip_file.read()
-            response._content = decompressed_data
-        else:
-            response._content = body_data
-        return response
-
-    def close(self):
-        """Ferme l'adaptateur et ses ressources associées"""
-        pass
-
-
-class NtlmProxyDict:
-    """
-    Classe pour encapsuler une session NTLM comme un dictionnaire de proxy
-    
-    Cette classe permet d'utiliser une session NTLM comme un dictionnaire
-    de proxy standard, compatible avec les API requests
-    """
-    
-    def __init__(self, ntlm_session):
-        """
-        Initialise un dictionnaire de proxy NTLM
-        
-        Args:
-            ntlm_session (requests.Session): Session NTLM à encapsuler
-        """
-        self.ntlm_session = ntlm_session
-
-    def __getitem__(self, key):
-        """
-        Retourne la session NTLM pour http ou https
-        
-        Args:
-            key (str): Protocole ('http' ou 'https')
-            
-        Returns:
-            requests.Session: Session NTLM
-            
-        Raises:
-            KeyError: Si le protocole n'est pas supporté
-        """
-        # Retourner la session NTLM pour http ou https
-        if key in ('http', 'https'):
-            return self.ntlm_session
-        # Lever une erreur pour les clés non supportées
-        raise KeyError(f"Proxy key '{key}' not found.")
-
-    def __setitem__(self, key, value):
-        """
-        Ne pas autoriser la modification des proxies
-        
-        Raises:
-            NotImplementedError: Toujours levée car non supporté
-        """
-        # Ne pas autoriser la modification des proxies
-        raise NotImplementedError("Modification of proxy settings is not allowed.")
-
-    def get(self, key, default=None):
-        """
-        Gérer l'appel pour un proxy
-        
-        Args:
-            key (str): Protocole ('http' ou 'https')
-            default: Valeur par défaut si non trouvé
-            
-        Returns:
-            requests.Session: Session NTLM ou default
-        """
-        # Gérer l'appel pour un proxy
-        return self.__getitem__(key) if key in ('http', 'https') else default
-
-    def keys(self):
-        """
-        Retourne les clés supportées
-        
-        Returns:
-            list: Liste des protocoles supportés
-        """
-        # Retourne les clés supportées
-        return ['http', 'https']
-
-    def __contains__(self, key):
-        """
-        Permet de vérifier si une clé est dans le dictionnaire
-        
-        Args:
-            key (str): Protocole à vérifier
-            
-        Returns:
-            bool: True si le protocole est supporté
-        """
-        # Permet de vérifier si une clé est dans le dictionnaire
-        return key in ('http', 'https')

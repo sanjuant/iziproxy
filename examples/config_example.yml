@@ -1,44 +1,41 @@
 # Exemple de configuration IziProxy
+# Emplacements recherchés : ./iziproxy.yml, ~/.config/iziproxy.yml, ~/.iziproxy.yml
 
-# Configuration des environnements
 environments:
   local:
-    proxy_url: "http://proxy.example.com:8080"
+    # Pas de proxy_url : détection automatique (variables, système, PAC)
     requires_auth: true
-    auth_type: "ntlm"                     # Authentification NTLM en local (poste Windows)
+    auth_type: ntlm              # poste Windows : session courante via SSPI
 
   dev:
     proxy_url: "http://dev-proxy.example.com:8080"
     requires_auth: true
-    auth_type: "basic"                    # Authentification basique
+    auth_type: basic
+    no_proxy: "*.dev.example.com,10.0.0.0/8"
 
   prod:
-    proxy_url: "http://prod-proxy.example.com:8080"
-    requires_auth: false
+    pac_url: "http://pac.example.com/proxy.pac"
+    requires_auth: false          # omis : détecté en interrogeant le proxy
 
-# Configuration de la détection d'environnement
+# Exclusions communes à tous les environnements
+no_proxy: "<local>,*.internal.example.com"
+
 environment_detection:
-  method: "auto"  # auto, env_var, hostname, ip, ask
-  
-  # Patterns pour la détection par nom d'hôte
+  method: auto                    # auto, env_var, hostname, ip, ask
+  env_var_name: APP_ENV           # variable supplémentaire (IZIPROXY_ENV reste prioritaire)
   hostname_patterns:
-    local: ["local", "laptop", "desktop", "dev-pc"]
-    dev: ["dev", "staging", "test", "preprod"]
-    prod: ["prod", "production"]
-  
-  # Expressions régulières pour la détection par nom d'hôte
+    dev: ["-dev", "staging"]
+    prod: ["-prod"]
   hostname_regex:
-    local: ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"]
-    dev: ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"]
-    prod: ["^prod\\d*-", "^production\\d*-"]
-  
-  # Plages IP pour la détection par adresse IP
+    prod: ['^prd\d+-']
   ip_ranges:
-    local: ["192.168.0.0/24", "127.0.0.1-127.0.0.255"]
     dev: ["10.0.0.0/16"]
-    prod: ["172.16.0.0/16"]
+    prod: ["172.16.0.0/16", "192.168.10.1-192.168.10.50"]
 
-# Configuration de la détection de proxy système
 system_proxy:
-  use_system_proxy: true  # Utiliser le proxy système si pas de proxy explicite
-  detect_pac: true  # Détecter et utiliser les fichiers PAC
+  use_system_proxy: true
+  detect_env_vars: true
+  detect_pac: true                # nécessite pip install iziproxy[pac]
+
+credentials:
+  prompt: true                    # false pour ne jamais demander (serveurs, CI)

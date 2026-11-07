@@ -6,7 +6,7 @@ Merci de votre intérêt pour IziProxy ! Voici comment vous pouvez contribuer au
 
 1. Clonez le dépôt :
    ```bash
-   git clone https://github.com/votrenom/iziproxy.git
+   git clone https://github.com/sanjuant/iziproxy.git
    cd iziproxy
    ```
 

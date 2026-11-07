@@ -1,246 +1,94 @@
-Guide d'utilisation
-================
+Utilisation
+===========
 
-Ce guide présente les principales façons d'utiliser IziProxy dans vos projets.
-
-Utilisation basique
-------------------
-
-Créer une instance IziProxy
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-La façon la plus simple d'utiliser IziProxy est de créer une instance sans paramètres :
+Création
+--------
 
 .. code-block:: python
 
    from iziproxy import IziProxy
-   
-   # Création avec détection automatique
-   proxy = IziProxy()
 
-IziProxy détectera automatiquement :
+   proxy = IziProxy()                       # tout est détecté
+   proxy = IziProxy(environment="prod")     # environnement forcé
+   proxy = IziProxy(proxy_url="http://proxy.corp:8080", username="u", password="p")
 
-* L'environnement d'exécution (local, dev, prod)
-* La configuration de proxy appropriée pour cet environnement
-* Les identifiants nécessaires (si l'authentification est requise)
+La création est instantanée : le proxy et l'authentification ne sont
+déterminés qu'à la première utilisation.
 
-Utiliser une session requests préconfigurée
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Intégration avec requests
+-------------------------
 
-La méthode la plus directe pour effectuer des requêtes est d'utiliser une session préconfigurée :
+Session préconfigurée (recommandé)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: python
 
-   # Obtenir une session requests préconfigurée
    session = proxy.create_session()
-   
-   # Utiliser la session comme une session requests normale
-   response = session.get('https://example.com')
-   
-   # Toutes les requêtes de cette session utiliseront automatiquement le proxy
-   response = session.post('https://api.example.com/data', json={'key': 'value'})
+   session.get("https://example.com")
 
-Cette approche est recommandée car elle gère automatiquement :
+   # ou une session existante (les réglages de nouvelles tentatives sont conservés)
+   proxy.configure_session(my_session)
 
-* La configuration du proxy
-* L'authentification (basique ou NTLM)
-* La réutilisation des connexions
+Le proxy est choisi **pour chaque requête** : un hôte exclu ou déclaré
+``DIRECT`` par le PAC est contacté directement. C'est aussi la seule méthode
+qui prend en charge NTLM.
 
-Utiliser un dictionnaire de proxy
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Si vous préférez configurer vos propres sessions ou requêtes, vous pouvez obtenir un dictionnaire de proxy :
-
-.. code-block:: python
-
-   # Obtenir un dictionnaire de proxy compatible avec requests
-   proxies = proxy.get_proxy_dict()
-   
-   # Utiliser avec une requête individuelle
-   response = requests.get('https://example.com', proxies=proxies)
-   
-   # Ou configurer une session
-   session = requests.Session()
-   session.proxies = proxies
-   response = session.get('https://example.com')
-
-Utiliser les variables d'environnement
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Pour les bibliothèques qui n'utilisent pas requests mais respectent les variables d'environnement standard :
-
-.. code-block:: python
-
-   # Définir les variables d'environnement HTTP_PROXY, HTTPS_PROXY, etc.
-   proxy.set_environment_variables()
-   
-   # Utiliser d'autres bibliothèques qui respectent ces variables
-   import urllib.request
-   response = urllib.request.urlopen('https://example.com')
-   
-   # Nettoyer les variables d'environnement quand vous avez terminé
-   proxy.clear_environment_variables()
-
-Cette méthode est utile pour les bibliothèques tierces qui ne prennent pas explicitement en charge les proxys mais qui respectent les variables d'environnement standard.
-
-Utiliser le monkey patching
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-Pour simplifier l'utilisation d'IziProxy dans des projets existants ou avec des bibliothèques tierces,
-vous pouvez appliquer un "monkey patching" au module requests :
-
-.. code-block:: python
-
-   # Configurer IziProxy et patcher le module requests
-   proxy = IziProxy()
-   proxy.patch_requests()
-   
-   # À partir de ce point, toutes les requêtes requests utiliseront automatiquement le proxy
-   import requests
-   response = requests.get('https://example.com')  # Utilise le proxy
-   
-   # Parfait pour du code existant ou des bibliothèques tierces qui utilisent requests
-   # sans avoir à modifier le code source
-   
-   # Restaurer requests à son état original si nécessaire
-   proxy.unpatch_requests()
-
-Cette technique est particulièrement utile pour :
-
-* Intégrer IziProxy dans des projets existants sans avoir à modifier tout le code
-* Utiliser des bibliothèques tierces qui ne supportent pas facilement la configuration de proxy
-* Simplifier la configuration d'un projet entier en une seule ligne de code
-
-Utilisation avec des bibliothèques tierces
----------------------------------
-
-Utiliser IziProxy avec des wrappers d'API
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Un cas d'utilisation avancé mais très puissant est d'utiliser IziProxy avec des wrappers d'API tierces qui utilisent ``requests``.
-Mais que se passe-t-il si le wrapper fait lui-même du monkey patching?
-
-Voici un exemple pratique montrant comment intégrer IziProxy dans un wrapper d'API qui patch également ``requests`` :
-
-.. code-block:: python
-
-   class APIClient:
-       """
-       Client pour interagir avec une API tierce
-       """
-       def __init__(self):
-           # Configuration
-           self.api_key = "your-api-key"
-           self.api_url = "https://api.example.com"
-           
-           # Obtention d'une session préconfigurée avec IziProxy
-           self.session = IziProxy().create_session()
-   
-           # Monkey patch requests methods avec notre session
-           self._patch_requests()
-   
-           # Important: l'API est initialisée APRÈS le monkey patching
-           self.api = None
-           self._initialize_api()
-       
-       def _initialize_api(self):
-           """
-           Initialise l'API tierce (qui utilisera requests en interne)
-           """
-           self.api = SomeThirdPartyAPI(
-               self.api_url,
-               self.api_key
-           )
-   
-       def _patch_requests(self):
-           """
-           Remplace les méthodes du module requests par celles de notre session
-           """
-           import requests
-           
-           # Remplacer les méthodes par celles de notre session préconfigurée
-           requests.get = self.session.get
-           requests.post = self.session.post
-           requests.put = self.session.put
-           requests.patch = self.session.patch
-           requests.delete = self.session.delete
-       
-       def find_resources(self, query_params):
-           """
-           Recherche des ressources via l'API
-           """
-           # Cette méthode appelle l'API tierce en interne, qui utilisera requests
-           # Mais comme requests a été patché, c'est notre session qui sera utilisée
-           response = self.api.find_resources(query_params)
-           return response
-
-**Comment cela fonctionne**:
-
-Le point clé ici est l'ordre des opérations:
-
-1. Vous créez une session préconfigurée avec IziProxy
-2. Vous remplacez les méthodes du module ``requests`` par celles de votre session
-3. **Ensuite** vous initialisez l'API tierce
-
-Quand l'API tierce fera des appels comme ``requests.get(url, ...)``:
-
-1. Ces appels passeront par la session IziProxy configurée
-2. La configuration proxy sera automatiquement appliquée
-3. L'API ne saura même pas qu'elle passe par un proxy
-
-Cette technique est particulièrement utile lorsque:
-
-* La bibliothèque tierce ne permet pas de passer une session personnalisée
-* Vous avez besoin d'intégrer IziProxy dans un environnement complexe
-* Vous souhaitez garder une séparation claire entre la configuration du proxy et l'utilisation de l'API
-
-Authentification basique
+Dictionnaire de proxys
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Pour l'authentification basique, IziProxy ajoute automatiquement les identifiants nécessaires :
+.. code-block:: python
+
+   requests.get(url, proxies=proxy.get_proxy_dict(url))
+
+Les identifiants Basic sont inclus (encodés) dans les URLs. Passer l'URL
+cible permet de tenir compte des exclusions et du PAC.
+
+Variables d'environnement
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: python
 
-   proxy = IziProxy(
-       proxy_url="http://proxy.example.com:8080",
-       username="user",
-       password="pass"
-   )
-   
-   session = proxy.create_session()
-   # L'authentification sera automatiquement ajoutée aux requêtes
+   proxy.set_environment_variables()   # HTTP(S)_PROXY, NO_PROXY
+   subprocess.run(["pip", "install", "paquet"])
+   proxy.clear_environment_variables() # restaure les valeurs précédentes
 
-Authentification NTLM
-^^^^^^^^^^^^^^^^^^^
-
-Pour l'authentification NTLM (courante dans les environnements Windows d'entreprise) :
+Patch global de requests
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: python
 
-   proxy = IziProxy(
-       proxy_url="http://proxy.example.com:8080",
-       username="domain\\user",  # Notez la double barre oblique
-       password="pass",
-       domain="DOMAIN"  # Optionnel, peut être inclus dans le nom d'utilisateur
-   )
-   
-   # S'assurer que les dépendances NTLM sont installées
-   session = proxy.create_session()
-   # L'authentification NTLM sera gérée automatiquement
+   proxy.patch_requests()
+   requests.get(url)            # passe par le proxy
+   third_party_library.call()   # ses sessions requests aussi
+   proxy.unpatch_requests()
 
-Assurez-vous d'avoir installé les dépendances NTLM avec ``pip install iziproxy[ntlm]``.
+   # ou, avec restauration automatique :
+   with proxy:
+       proxy.patch_requests()
+       ...
 
-Stockage sécurisé des identifiants
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Toutes les sessions ``requests`` créées pendant le patch sont configurées,
+y compris celles de ``requests.get()`` et des bibliothèques tierces.
 
-IziProxy utilise keyring pour stocker de manière sécurisée les identifiants, évitant ainsi d'avoir à les inclure en clair dans votre code :
+Informations
+------------
 
 .. code-block:: python
 
-   # Premier usage - vous serez invité à saisir vos identifiants
-   proxy = IziProxy()
-   session = proxy.create_session()
-   
-   # Utilisations suivantes - les identifiants seront récupérés depuis keyring
-   proxy = IziProxy()
-   session = proxy.create_session()
+   proxy.environment                   # 'local', 'dev', 'prod'
+   proxy.get_proxy_url()               # URL du proxy sans identifiants, ou None
+   proxy.get_proxy_url("https://intranet.corp/")
+   proxy.get_proxy_host(), proxy.get_proxy_port()
+   proxy.requires_auth, proxy.auth_type
+   proxy.get_credentials()             # (utilisateur, SecurePassword, domaine)
+   print(proxy.get_proxy_config())     # mots de passe masqués
+
+Maintenance
+-----------
+
+.. code-block:: python
+
+   proxy.refresh()            # relancer toutes les détections
+   proxy.clear_auth_cache()   # redétecter l'authentification
+   proxy.reset_credentials()  # supprimer le mot de passe du trousseau
+   proxy.set_debug(True)      # journaux détaillés sur stderr
