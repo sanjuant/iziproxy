@@ -12,6 +12,7 @@ import requests
 from .adapters import IziProxyAdapter
 from .config_manager import ConfigManager
 from .env_detector import EnvironmentDetector
+from .local_proxy import LocalProxy
 from .logger import enable_debug_logging, disable_debug_logging, get_logger
 from .proxy_detector import ProxyDetector
 from .proxy_utils import (
@@ -104,6 +105,8 @@ class IziProxy:
         self._credentials = None
         self._pac_results = {}
         self._saved_env = None
+        self._env_local_proxy = None
+        self._local_proxies = []
         self._warned = set()
 
         logger.debug("IziProxy initialized (environment: %s)", self.current_env)
@@ -117,6 +120,7 @@ class IziProxy:
     def __exit__(self, *exc):
         self.unpatch_requests()
         self.clear_environment_variables()
+        self.stop_local_proxies()
         return False
 
     # ------------------------------------------------------------------ #
@@ -467,18 +471,84 @@ class IziProxy:
         """
         return self.configure_session(requests.Session())
 
-    def set_environment_variables(self):
+    def start_local_proxy(self, port=0, timeout=30.0):
+        """
+        Démarre un proxy local (façon cntlm / px) sur 127.0.0.1.
+
+        Les outils qui ne lisent que HTTP(S)_PROXY (pip, git, curl, conda...)
+        peuvent alors traverser un proxy NTLM / Negotiate ou Basic sans
+        connaître d'identifiants : le proxy local choisit la route de chaque
+        URL comme create_session() (no_proxy, PAC, connexion directe) et
+        s'authentifie à leur place.
+
+        La détection de l'authentification et la recherche des identifiants
+        (éventuelle saisie interactive) ont lieu ici, dans le thread appelant.
+
+        Args:
+            port (int): Port d'écoute (0 : port libre choisi par le système)
+            timeout (float): Délai de connexion / lecture vers l'amont (secondes)
+
+        Returns:
+            LocalProxy: Proxy démarré (url, port, stop(), gestionnaire de contexte)
+        """
+        if self._raw_proxies() and self._auth_settings()["required"]:
+            self._get_credentials()
+        local = LocalProxy(self, port=port, timeout=timeout).start()
+        with self._lock:
+            self._local_proxies = [p for p in self._local_proxies if p.running]
+            self._local_proxies.append(local)
+        return local
+
+    def stop_local_proxies(self):
+        """Arrête tous les proxys locaux démarrés par cette instance."""
+        with self._lock:
+            proxies, self._local_proxies = self._local_proxies, []
+            self._env_local_proxy = None
+        for local in proxies:
+            local.stop()
+
+    def set_environment_variables(self, local_proxy=False):
         """
         Définit HTTP(S)_PROXY et NO_PROXY pour les outils qui les lisent
         (pip, git, curl, urllib...). Les valeurs précédentes sont mémorisées
         et restaurées par clear_environment_variables().
 
+        Args:
+            local_proxy (bool): Faire pointer les variables vers un proxy
+                local (voir start_local_proxy()) qui gère NTLM, le PAC et les
+                exclusions ; il est arrêté par clear_environment_variables()
+
         Returns:
             dict: Variables définies
         """
+        if local_proxy:
+            values = self._local_proxy_env()
+        else:
+            values = self._direct_env()
+
+        if self._saved_env is None:
+            self._saved_env = {name: os.environ.get(name) for name in _PROXY_ENV_VARS}
+        os.environ.update(values)
+        logger.debug("Proxy environment variables set: %s", sorted(values))
+        return values
+
+    def _local_proxy_env(self):
+        """Variables pointant vers le proxy local (démarré si nécessaire)."""
+        local = self._env_local_proxy
+        if local is None or not local.running:
+            local = self._env_local_proxy = self.start_local_proxy()
+        no_proxy = no_proxy_for_env(self._proxy_settings()["no_proxy"])
+        return {
+            "HTTP_PROXY": local.url, "http_proxy": local.url,
+            "HTTPS_PROXY": local.url, "https_proxy": local.url,
+            "NO_PROXY": no_proxy, "no_proxy": no_proxy,
+        }
+
+    def _direct_env(self):
+        """Variables pointant directement vers le proxy d'entreprise."""
         if self._uses_ntlm():
             self._warn_once("ntlm-env", "Environment variables cannot carry NTLM authentication; "
-                                        "tools reading them will not be authenticated")
+                                        "use set_environment_variables(local_proxy=True)")
         if self._proxy_settings()["source"] == "pac":
             logger.debug("PAC configuration: environment variables use the proxy for %s", DEFAULT_TARGET_URL)
 
@@ -490,15 +560,16 @@ class IziProxy:
             values["HTTPS_PROXY"] = values["https_proxy"] = proxies["https"]
         if proxies:
             values["NO_PROXY"] = values["no_proxy"] = no_proxy_for_env(self._proxy_settings()["no_proxy"])
-
-        if self._saved_env is None:
-            self._saved_env = {name: os.environ.get(name) for name in _PROXY_ENV_VARS}
-        os.environ.update(values)
-        logger.debug("Proxy environment variables set: %s", sorted(values))
         return values
 
     def clear_environment_variables(self):
-        """Restaure les variables d'environnement d'avant set_environment_variables()."""
+        """
+        Restaure les variables d'environnement d'avant set_environment_variables()
+        et arrête le proxy local qu'elle avait démarré.
+        """
+        local, self._env_local_proxy = self._env_local_proxy, None
+        if local is not None:
+            local.stop()
         if self._saved_env is None:
             return
         for name, value in self._saved_env.items():

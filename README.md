@@ -22,6 +22,7 @@ configure `requests`.
 - 🔑 **Identifiants** : paramètres, variables d'environnement, `.env`, trousseau système, saisie graphique ou console (une seule fois, puis mémorisée)
 - 🛡️ **Sécurité** : les identifiants ne sont envoyés qu'au proxy (jamais au site cible), masqués dans les journaux et chiffrés en mémoire
 - 🔌 **Intégration** : session `requests`, dictionnaire `proxies=`, variables d'environnement pour les outils externes, patch global de `requests`
+- 🔁 **Proxy local (façon cntlm / px)** : pip, git, curl, conda... traversent un proxy NTLM sans identifiants
 
 ## 📦 Installation
 
@@ -50,7 +51,8 @@ import requests
 requests.get("https://example.com", proxies=proxy.get_proxy_dict())
 
 # 3. Variables d'environnement pour pip, git, curl...
-proxy.set_environment_variables()
+proxy.set_environment_variables()                  # proxy sans auth ou Basic
+proxy.set_environment_variables(local_proxy=True)  # NTLM, PAC : via un proxy local
 ...
 proxy.clear_environment_variables()   # restaure les valeurs précédentes
 
@@ -165,7 +167,48 @@ pip install iziproxy[ntlm]
   certificats, timeouts, redirections, cookies, compression et streaming.
 - Des identifiants refusés lèvent `iziproxy.NtlmAuthenticationError`.
 - `get_proxy_dict()` et `set_environment_variables()` ne peuvent pas porter
-  une authentification NTLM : utilisez `create_session()` ou `patch_requests()`.
+  une authentification NTLM : utilisez `create_session()` ou `patch_requests()`
+  en Python, et le proxy local ci-dessous pour les outils externes.
+
+## 🔁 Proxy local pour pip, git, curl, conda...
+
+Ces outils ne lisent que `HTTP(S)_PROXY` et ne savent pas s'authentifier en
+NTLM. IziProxy peut démarrer un petit proxy sur `127.0.0.1` (comme cntlm ou
+px) qui s'authentifie à leur place :
+
+```python
+import os
+import subprocess
+from iziproxy import IziProxy
+
+proxy = IziProxy()
+
+# Variables d'environnement pointant vers le proxy local (démarré au besoin)
+proxy.set_environment_variables(local_proxy=True)
+subprocess.run(["pip", "install", "paquet"], check=True)
+subprocess.run(["git", "clone", "https://github.com/org/depot.git"], check=True)
+proxy.clear_environment_variables()   # restaure les variables et arrête le proxy local
+
+# Ou en gérant le proxy local soi-même
+with proxy.start_local_proxy(port=3128) as local:
+    print(local.url)                  # http://127.0.0.1:3128
+    env = dict(os.environ, HTTP_PROXY=local.url, HTTPS_PROXY=local.url)
+    subprocess.run(["curl", "https://example.com"], env=env, check=True)
+```
+
+- Requêtes HTTP en forme absolue et tunnels `CONNECT` (HTTPS : le trafic
+  chiffré n'est pas déchiffré, les certificats restent vérifiés par l'outil).
+- Chaque URL suit la même route que `create_session()` : exclusions, PAC,
+  connexion directe.
+- Authentification amont NTLM / Negotiate (session Windows courante ou
+  identifiants) ou Basic ; les identifiants ne sont jamais envoyés au site cible.
+- Les identifiants sont recherchés au démarrage (une éventuelle saisie a lieu à
+  ce moment-là, pas pendant une requête).
+- Erreurs renvoyées au client : `502` (proxy injoignable, identifiants
+  refusés), `504` (délai dépassé), `407` relayé si le proxy amont refuse.
+- Le proxy local n'écoute que sur la boucle locale et n'exige aucune
+  authentification : sur une machine partagée, les autres utilisateurs
+  locaux pourraient s'en servir.
 
 ## 🧪 Développement
 

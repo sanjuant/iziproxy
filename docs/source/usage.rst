@@ -52,6 +52,33 @@ Variables d'environnement
    subprocess.run(["pip", "install", "paquet"])
    proxy.clear_environment_variables() # restaure les valeurs précédentes
 
+Les variables d'environnement ne peuvent décrire qu'un proxy sans
+authentification ou Basic, et un seul proxy pour toutes les URLs. Avec un
+proxy NTLM / Negotiate ou un fichier PAC, utilisez le proxy local.
+
+Proxy local pour les outils externes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Comme cntlm ou px, IziProxy peut démarrer un proxy HTTP sur ``127.0.0.1``
+qui s'authentifie auprès du proxy d'entreprise à la place de pip, git, curl,
+conda... Ces outils n'ont besoin que de ``HTTP(S)_PROXY``.
+
+.. code-block:: python
+
+   proxy.set_environment_variables(local_proxy=True)
+   subprocess.run(["pip", "install", "paquet"], check=True)
+   proxy.clear_environment_variables()   # arrête aussi le proxy local
+
+   # Gestion explicite (port fixe, plusieurs processus...)
+   with proxy.start_local_proxy(port=3128) as local:
+       env = dict(os.environ, HTTP_PROXY=local.url, HTTPS_PROXY=local.url)
+       subprocess.run(["git", "fetch"], env=env, check=True)
+
+``start_local_proxy()`` retourne un :class:`iziproxy.LocalProxy` (``url``,
+``host``, ``port``, ``running``, ``stop()``, gestionnaire de contexte). Les
+proxys locaux encore actifs sont arrêtés en sortie d'un bloc ``with proxy:``
+ou par ``stop_local_proxies()``.
+
 Patch global de requests
 ^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -50,6 +50,29 @@ proxy. Des identifiants refusés lèvent ``NtlmAuthenticationError``.
 Sous Windows, sans mot de passe, pyspnego utilise SSPI avec la session
 courante.
 
+Proxy local
+-----------
+
+``start_local_proxy()`` lance un serveur ``socketserver`` multi-thread sur
+``127.0.0.1``. Pour chaque connexion cliente :
+
+* ``CONNECT hôte:port`` : la route est celle de ``https://hôte:port/``. En
+  direct, le proxy local se connecte à la cible ; via un proxy NTLM, il
+  réutilise la négociation de l'adaptateur NTLM (``open_tunnel()``) ; via un
+  proxy Basic, il envoie ``CONNECT`` avec ``Proxy-Authorization``. Une fois le
+  tunnel établi, les octets sont relayés sans être lus.
+* requête HTTP en forme absolue : le corps (``Content-Length`` ou
+  ``chunked``) est lu, les en-têtes propres au saut (``Connection``,
+  ``Proxy-Authorization``...) sont retirés, puis la requête est envoyée en
+  forme d'origine (direct) ou absolue (proxy) avec la même négociation NTLM.
+  La réponse est relayée avec ``Connection: close`` : une requête par
+  connexion cliente.
+
+Le type d'authentification et les identifiants sont déterminés au démarrage,
+dans le thread appelant. Une route qui reviendrait vers le proxy local
+lui-même (par exemple après ``refresh()`` alors que ``HTTP_PROXY`` pointe vers
+lui) est refusée avec ``508 Loop Detected``.
+
 Journalisation
 --------------
 

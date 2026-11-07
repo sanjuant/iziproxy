@@ -8,6 +8,12 @@ Classe principale
    :members:
    :special-members: __enter__, __exit__
 
+Proxy local
+-----------
+
+.. autoclass:: iziproxy.LocalProxy
+   :members: url, running, start, stop
+
 Exceptions
 ----------
 

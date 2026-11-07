@@ -356,12 +356,18 @@ class NtlmProxyAdapter(HTTPAdapter):
 
         return self._build(request, sock, response, method, stream)
 
-    def _send_https(self, request, parts, proxy_host, proxy_port,
-                    connect_timeout, read_timeout, verify, cert):
-        """Tunnel CONNECT authentifié puis requête chiffrée."""
-        target_port = parts.port or 443
-        authority = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-        authority = f"{authority}:{target_port}"
+    def open_tunnel(self, proxy_host, proxy_port, authority, connect_timeout=None):
+        """
+        Ouvre un tunnel CONNECT authentifié vers « hôte:port ».
+
+        Utilisé par l'adaptateur (HTTPS) et par le proxy local.
+
+        Args:
+            authority (str): Cible du tunnel, au format « hôte:port »
+
+        Returns:
+            tuple: (socket, réponse finale du proxy, non consommée)
+        """
 
         def connect_leg(sock, auth_header):
             lines = [f"CONNECT {authority} HTTP/1.1", f"Host: {authority}",
@@ -373,9 +379,18 @@ class NtlmProxyAdapter(HTTPAdapter):
             return self._read_response(sock, "CONNECT")
 
         try:
-            sock, response = self._negotiate(proxy_host, proxy_port, connect_timeout, connect_leg)
+            return self._negotiate(proxy_host, proxy_port, connect_timeout, connect_leg)
         except socket.timeout as exc:
             raise ConnectTimeout(f"Timed out negotiating with proxy {proxy_host}:{proxy_port}") from exc
+
+    def _send_https(self, request, parts, proxy_host, proxy_port,
+                    connect_timeout, read_timeout, verify, cert):
+        """Tunnel CONNECT authentifié puis requête chiffrée."""
+        target_port = parts.port or 443
+        authority = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+        authority = f"{authority}:{target_port}"
+
+        sock, response = self.open_tunnel(proxy_host, proxy_port, authority, connect_timeout)
 
         if response.status != 200:
             status, reason = response.status, response.reason

@@ -160,12 +160,12 @@ Voici quelques différences clés à prendre en compte lors de la migration :
 
 1. **Proxy local vs proxy distant** - CNTLM crée un proxy local, tandis qu'IziProxy communique directement avec le proxy d'entreprise
 2. **Configuration globale vs par application** - CNTLM affecte toutes les applications, tandis qu'IziProxy est spécifique à votre application Python
-3. **Variables d'environnement** - ``proxy.set_environment_variables()`` ne peut pas transmettre une authentification NTLM aux outils externes : pour eux, CNTLM (ou un équivalent) reste nécessaire
+3. **Variables d'environnement** - ``proxy.set_environment_variables()`` seul ne peut pas transmettre une authentification NTLM aux outils externes ; ``proxy.set_environment_variables(local_proxy=True)`` démarre un proxy local qui joue le rôle de CNTLM pour eux
 
 Compatibilité avec les applications existantes
 ----------------------------------------------
 
 Pour les applications qui ne peuvent pas être modifiées pour utiliser IziProxy directement, vous pouvez :
 
-1. Utiliser ``proxy.set_environment_variables()`` pour configurer les variables d'environnement HTTP_PROXY, etc.
+1. Utiliser ``proxy.set_environment_variables(local_proxy=True)`` pour configurer les variables d'environnement HTTP_PROXY, etc. vers un proxy local qui gère NTLM et le PAC
 2. Développer un petit script qui démarre votre application avec les variables d'environnement correctement configurées
