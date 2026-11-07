@@ -161,20 +161,41 @@ Selenium et Playwright
 
 .. code-block:: python
 
+   browser = playwright.chromium.launch(proxy=proxy.playwright_proxy())
+
    options = webdriver.ChromeOptions()
    options.proxy = proxy.selenium_proxy()
    driver = webdriver.Chrome(options=options)
 
-   browser = playwright.chromium.launch(proxy=proxy.playwright_proxy())
+Les navigateurs pilotés n'acceptent pas de règles par URL : ils passent par
+le proxy local partagé.
 
-Les navigateurs pilotés n'acceptent ni identifiants dans l'URL du proxy ni
-règles par URL : ils passent par le proxy local partagé.
+* ``playwright_proxy()`` renvoie ``{"server", "username", "password"}`` :
+  Playwright transmet le jeton du proxy local.
+* ``selenium_proxy()`` : WebDriver ne sait pas transmettre d'identifiants au
+  proxy. Selenium utilise donc un proxy local **sans jeton**, que tout
+  processus de la machine peut emprunter tant qu'il tourne. Sur un poste
+  partagé, préférez Playwright (voir :doc:`security`).
 
 Autres clients
 --------------
 
 ``proxy_for(url)`` donne l'URL de proxy à fournir à n'importe quel client :
-``None`` pour une connexion directe, l'URL du proxy avec ses identifiants
-Basic encodés, ou l'URL du proxy local pour NTLM. ``local_proxy_url()``
-donne directement l'URL du proxy local partagé, pour les clients qui ne
-prennent qu'une adresse sans identifiants.
+
+* ``None`` : connexion directe ;
+* l'URL du proxy, avec ses identifiants Basic encodés s'il en faut ;
+* pour NTLM, l'URL du proxy local partagé (jeton inclus).
+
+``local_proxy_url()`` donne directement l'URL du proxy local partagé. Le
+client doit envoyer en Basic les identifiants contenus dans cette URL ; s'il
+en est incapable, ``local_proxy_url(token=False)`` fournit un proxy local
+sans jeton (voir :doc:`security`).
+
+Limites communes
+----------------
+
+* Les proxys SOCKS (directive PAC ``SOCKS`` / ``SOCKS5``) ne sont gérés que
+  par requests (avec ``requests[socks]``) et httpx (avec ``httpx[socks]``) ;
+  le proxy local répond ``502`` pour une telle route.
+* http.client, urllib, gRPC et websockets ne savent pas parler TLS à un
+  proxy ``https://`` : leurs adaptateurs passent alors par le proxy local.

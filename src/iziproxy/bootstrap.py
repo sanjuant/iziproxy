@@ -22,6 +22,8 @@ import logging
 import threading
 import urllib.request
 
+from .proxy_utils import strip_credentials
+
 logger = logging.getLogger("iziproxy")
 
 _LOCK = threading.RLock()
@@ -38,7 +40,7 @@ class Installation:
     - ``proxy`` (IziProxy) : instance utilisée ; elle donne accès aux
       réglages fins (httpx_client(), aiohttp_session(), get_proxy_url()...)
     - ``active`` (bool) : False si aucun proxy n'a été trouvé (rien n'a été modifié)
-    - ``local_proxy_url`` (str|None) : URL du proxy local, si démarré
+    - ``local_proxy_url`` (str|None) : URL du proxy local, jeton inclus, si démarré
     - ``environment`` (dict) : variables d'environnement définies
     - ``requests_patched`` (bool) : requests est configuré
     - ``urllib_patched`` (bool) : urllib.request.urlopen() est configuré
@@ -88,7 +90,8 @@ class Installation:
         if izi.requires_auth:
             parts[0] += f" ({izi.auth_type})"
         if self.local_proxy_url:
-            parts.append(f"local {self.local_proxy_url}")
+            # Le jeton du proxy local ne doit pas finir dans les journaux
+            parts.append(f"local {strip_credentials(self.local_proxy_url)}")
         patched = [name for name, done in (("requests", self.requests_patched),
                                            ("urllib", self.urllib_patched),
                                            ("environment", bool(self.environment))) if done]

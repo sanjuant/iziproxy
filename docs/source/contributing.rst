@@ -44,13 +44,8 @@ Pour vérifier la couverture de code :
 Style de code
 -------------
 
-Nous utilisons Black pour le formatage du code :
-
-.. code-block:: bash
-
-   black src tests
-
-Et Flake8 pour la vérification de la qualité du code :
+Flake8 vérifie le code (configuration dans ``.flake8`` : lignes de 120
+caractères au plus) :
 
 .. code-block:: bash
 
@@ -73,31 +68,25 @@ Soumettre une Pull Request
 
    pytest
 
-4. Formatez le code avec Black :
-
-.. code-block:: bash
-
-   black src tests
-
-5. Vérifiez la qualité du code avec Flake8 :
+4. Vérifiez la qualité du code avec Flake8 :
 
 .. code-block:: bash
 
    flake8 src tests
 
-6. Committez vos modifications :
+5. Committez vos modifications :
 
 .. code-block:: bash
 
    git commit -am "Ajout de ma nouvelle fonctionnalité"
 
-7. Poussez vos modifications vers votre fork :
+6. Poussez vos modifications vers votre fork :
 
 .. code-block:: bash
 
    git push origin feature/ma-nouvelle-fonctionnalite
 
-8. Créez une Pull Request sur GitHub.
+7. Créez une Pull Request sur GitHub.
 
 Documentation
 -------------
@@ -139,8 +128,11 @@ Structure du projet
    ├── src/
    │   └── iziproxy/           # Package principal
    │       ├── __init__.py       # Exports publics
+   │       ├── bootstrap.py      # iziproxy.install() / uninstall()
    │       ├── proxy_manager.py  # Classe IziProxy
+   │       ├── local_proxy.py    # Proxy local façon cntlm (jeton, CONNECT, NTLM)
    │       ├── adapters.py       # Adaptateur requests (choix du proxy par requête)
+   │       ├── integrations/     # httpx, aiohttp, urllib3, urllib, http.client, gRPC, navigateurs
    │       ├── ntlm_auth.py      # Adaptateur NTLM / Negotiate (pyspnego)
    │       ├── proxy_detector.py # Proxy système et fichiers PAC
    │       ├── proxy_utils.py    # Exclusions, URLs, sonde d'authentification, TLS

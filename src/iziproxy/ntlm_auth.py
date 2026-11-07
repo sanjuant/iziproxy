@@ -44,6 +44,7 @@ from .proxy_utils import (
     parse_proxy_authenticate,
     proxy_host_port,
     split_timeout,
+    strip_credentials,
     wrap_tls,
 )
 from .secure_config import SecurePassword
@@ -411,7 +412,7 @@ class NtlmProxyAdapter(HTTPAdapter):
         try:
             return self._negotiate(proxy_url, connect_timeout, connect_leg, proxy_ssl_context)
         except socket.timeout as exc:
-            raise ConnectTimeout(f"Timed out negotiating with proxy {proxy_url}") from exc
+            raise ConnectTimeout(f"Timed out negotiating with proxy {strip_credentials(proxy_url)}") from exc
 
     def _send_https(self, request, parts, proxy_url, proxy_ctx,
                     connect_timeout, read_timeout, verify, cert):
@@ -468,7 +469,7 @@ class NtlmProxyAdapter(HTTPAdapter):
         try:
             sock, response = self._negotiate(proxy_url, connect_timeout, http_leg, proxy_ctx)
         except socket.timeout as exc:
-            raise ReadTimeout(f"Read timed out from proxy {proxy_url}") from exc
+            raise ReadTimeout(f"Read timed out from proxy {strip_credentials(proxy_url)}") from exc
         sock.settimeout(read_timeout)
         return sock, response
 
@@ -500,4 +501,3 @@ class NtlmProxyAdapter(HTTPAdapter):
             finally:
                 raw.close()
         return result
-

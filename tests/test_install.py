@@ -86,7 +86,8 @@ def test_no_password_in_the_environment(make_proxy):
     installation = iziproxy.install(proxy_url=proxy.url, username=proxy.username,
                                     password=proxy.password)
 
-    assert installation.local_proxy_url.startswith("http://127.0.0.1:")
+    assert installation.local_proxy_url.startswith("http://iziproxy:")
+    assert installation.local_proxy_url.split("@", 1)[1].startswith("127.0.0.1:")
     assert os.environ["HTTPS_PROXY"] == installation.local_proxy_url
     assert proxy.password not in " ".join(os.environ.values())
 
@@ -103,7 +104,10 @@ def test_installation_reports_what_was_done(ntlm_proxy):
     assert isinstance(installation.proxy, IziProxy)
     assert iziproxy.current() is installation
     text = installation.describe()
-    assert ntlm_proxy.url in text and "(ntlm)" in text and installation.local_proxy_url in text
+    local_address = "http://" + installation.local_proxy_url.split("@", 1)[1]
+    assert ntlm_proxy.url in text and "(ntlm)" in text and local_address in text
+    # Le jeton du proxy local n'apparaît pas dans le résumé (journalisé par install())
+    assert "iziproxy:" not in text
     assert "requests, urllib, environment" in str(installation)
 
 

@@ -261,7 +261,7 @@ class PasswordManager:
                     messagebox.showerror("Error", "A password is required", parent=root)
                     password_entry.focus_set()
                     return
-                domain = domain_var.get().strip() or None if auth_type == "ntlm" else None
+                domain = (domain_var.get().strip() or None) if auth_type == "ntlm" else None
                 result["value"] = (username, password, domain)
                 root.destroy()
 

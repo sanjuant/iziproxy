@@ -140,7 +140,7 @@ def test_local_proxy_relays_to_tls_basic_proxy(make_proxy, origin, tls_origin, s
     proxy = make_proxy(auth="basic", tls=True)
     server = origin if scheme == "http" else tls_origin
     izi = basic_izi(proxy)
-    with izi.start_local_proxy() as local:
+    with izi.start_local_proxy(port=0) as local:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": local.url, "https": local.url}),
             urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),

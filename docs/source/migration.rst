@@ -42,146 +42,80 @@ La version 0.7 réécrit le cœur de la bibliothèque. Changements visibles :
   le paramètre ``workstation`` de ``NtlmProxyAdapter``,
   ``get_current_environment()`` (propriété ``environment``) et la lecture
   de l'ancienne entrée ``username`` du trousseau.
+* Nouveau : un proxy local (``install()``, ``start_local_proxy()``) qui
+  s'authentifie à la place des outils externes ; il exige un jeton inclus
+  dans son URL (voir :doc:`security`).
+* ``verify="/chemin"`` lève ``ValueError`` si le fichier n'existe pas.
 
-Depuis CNTLM
-------------
+Depuis CNTLM ou px
+------------------
 
-Cette section explique comment migrer d'un proxy CNTLM vers IziProxy.
+CNTLM et px sont des proxys locaux qui s'authentifient en NTLM à la place
+des applications. IziProxy fait la même chose, sans service à installer ni
+mot de passe à écrire dans un fichier de configuration.
 
-Qu'est-ce que CNTLM ?
-^^^^^^^^^^^^^^^^^^^^^
+Pour un programme Python
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-CNTLM (Cntlm Authentication Proxy) est un proxy d'authentification populaire qui agit comme un intermédiaire entre vos applications et un proxy d'entreprise, en particulier ceux qui nécessitent une authentification NTLM. 
-
-Bien que CNTLM soit efficace, il présente plusieurs inconvénients :
-
-* Nécessite une installation et une configuration séparées
-* Exécute un processus distinct sur votre machine
-* Configuration complexe dans certains environnements
-* Gestion des mots de passe moins sécurisée
-* Nécessite des droits administrateur pour l'installation
-
-Avantages d'IziProxy par rapport à CNTLM
-----------------------------------------
-
-IziProxy offre plusieurs avantages par rapport à CNTLM :
-
-1. **Intégration native en Python** - Aucun processus ou service externe à exécuter
-2. **Configuration automatique** - Détection automatique de l'environnement et du proxy
-3. **Gestion sécurisée des identifiants** - Utilisation de keyring pour stocker les mots de passe
-4. **Portable** - Fonctionne sur toutes les plateformes sans installation système
-5. **Facile à utiliser** - API simple et intuitive
-6. **Compatible avec requests** - Intégration transparente avec la bibliothèque requests
-
-Guide de migration étape par étape
-----------------------------------
-
-Voici comment migrer de CNTLM vers IziProxy :
-
-Étape 1 : Installer IziProxy
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Commencez par installer IziProxy avec le support NTLM :
-
-.. code-block:: bash
-
-   pip install iziproxy[ntlm]
-
-Étape 2 : Récupérer les informations de CNTLM
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Récupérez les informations de votre configuration CNTLM actuelle, généralement dans ``/etc/cntlm.conf`` (Linux/macOS) ou ``C:\\Program Files\\Cntlm\\cntlm.ini`` (Windows) :
-
-* Nom d'utilisateur et domaine
-* URL du proxy d'entreprise
-* Port local utilisé par CNTLM
-
-Étape 3 : Configurer IziProxy
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Créez un fichier ``iziproxy.yml`` dans votre projet ou dans ``~/.config/`` :
-
-.. code-block:: yaml
-
-   environments:
-     # Reprenez la configuration de votre CNTLM
-     dev:
-       proxy_url: "http://proxy.entreprise.com:8080"  # URL du proxy d'entreprise
-       requires_auth: true
-       auth_type: "ntlm"
-   
-Le mot de passe n'a pas à figurer dans la configuration : sous Windows la
-session courante est utilisée ; ailleurs il est lu depuis ``IZIPROXY_PASSWORD``,
-le fichier ``.env`` ou le trousseau, ou demandé une seule fois.
-
-Étape 4 : Adapter votre code
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Remplacez les références au proxy CNTLM local par IziProxy :
-
-Avant (avec CNTLM) :
+Remplacez le dictionnaire qui pointait vers CNTLM par une ligne :
 
 .. code-block:: python
 
-   import requests
-   
-   # Configuration pour utiliser CNTLM en local
-   proxies = {
-       'http': 'http://localhost:3128',
-       'https': 'http://localhost:3128'
-   }
-   
-   # Utilisation avec requests
-   response = requests.get('https://example.com', proxies=proxies)
+   # Avant
+   proxies = {"http": "http://localhost:3128", "https": "http://localhost:3128"}
+   requests.get("https://example.com", proxies=proxies)
 
-Après (avec IziProxy) :
+   # Après
+   import iziproxy
+
+   iziproxy.install()
+   requests.get("https://example.com")
+
+Correspondance avec ``cntlm.conf``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+
+   * - CNTLM
+     - IziProxy
+   * - ``Proxy proxy.corp:8080``
+     - détecté ; sinon ``proxy_url="proxy.corp:8080"``
+   * - ``Username`` / ``Domain``
+     - session Windows ; sinon ``username=`` / ``domain=`` ou ``IZIPROXY_USERNAME`` / ``IZIPROXY_DOMAIN``
+   * - ``Password`` / ``PassNTLMv2``
+     - session Windows ; sinon trousseau du système (saisi une fois) ou ``IZIPROXY_PASSWORD``
+   * - ``NoProxy``
+     - détecté (``ProxyOverride`` Windows, ``NO_PROXY``) ; sinon ``no_proxy=``
+   * - ``Listen 3128``
+     - ``start_local_proxy(token="...")`` (port 3128 par défaut)
+
+Pour les outils externes
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Lancés depuis Python, pip, git ou curl héritent des variables posées par
+``install()``. Pour des outils lancés hors de Python, faites tourner un proxy
+local, comme cntlm, sur ``127.0.0.1:3128`` :
 
 .. code-block:: python
 
    from iziproxy import IziProxy
-   
-   # Détection et configuration automatiques
-   proxy = IziProxy()
-   
-   # Méthode 1 : Utiliser une session
-   session = proxy.create_session()
-   response = session.get('https://example.com')
-   
-   # Méthode 2 : Utiliser un dictionnaire de proxy
-   proxies = proxy.get_proxy_dict()
-   response = requests.get('https://example.com', proxies=proxies)
 
-Étape 5 : Arrêter CNTLM (optionnel)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   local = IziProxy().start_local_proxy(token="un-jeton-long-et-secret")
+   print("HTTPS_PROXY =", local.url)
+   local.serve_forever()   # Ctrl+C pour arrêter
 
-Une fois que vous avez vérifié qu'IziProxy fonctionne correctement, vous pouvez arrêter et désinstaller CNTLM :
+et configurez les outils avec cette URL (jeton inclus), par exemple
+``git config --global http.proxy http://iziproxy:un-jeton-long-et-secret@127.0.0.1:3128``.
+Arrêtez cntlm avant : les deux ne peuvent pas écouter sur le même port
+(sinon ``start_local_proxy(port=3129)``).
 
-Sur Linux :
+Différences avec CNTLM
+^^^^^^^^^^^^^^^^^^^^^^
 
-.. code-block:: bash
-
-   sudo service cntlm stop
-   sudo systemctl disable cntlm
-
-Sur Windows :
-
-1. Ouvrez les Services (services.msc)
-2. Trouvez le service CNTLM
-3. Arrêtez-le et définissez son démarrage sur "Manuel" ou "Désactivé"
-
-Différences d'utilisation
--------------------------
-
-Voici quelques différences clés à prendre en compte lors de la migration :
-
-1. **Proxy local vs proxy distant** - CNTLM crée un proxy local, tandis qu'IziProxy communique directement avec le proxy d'entreprise
-2. **Configuration globale vs par application** - CNTLM affecte toutes les applications, tandis qu'IziProxy est spécifique à votre application Python
-3. **Variables d'environnement** - ``proxy.set_environment_variables()`` seul ne peut pas transmettre une authentification NTLM aux outils externes ; ``proxy.set_environment_variables(local_proxy=True)`` démarre un proxy local qui joue le rôle de CNTLM pour eux
-
-Compatibilité avec les applications existantes
-----------------------------------------------
-
-Pour les applications qui ne peuvent pas être modifiées pour utiliser IziProxy directement, vous pouvez :
-
-1. Utiliser ``proxy.set_environment_variables(local_proxy=True)`` pour configurer les variables d'environnement HTTP_PROXY, etc. vers un proxy local qui gère NTLM et le PAC
-2. Développer un petit script qui démarre votre application avec les variables d'environnement correctement configurées
+* Le proxy local exige un jeton (voir :doc:`security`) : là où CNTLM accepte
+  toute connexion locale, une URL sans jeton reçoit ``407``.
+* Le PAC est évalué pour chaque URL et les exclusions du système sont
+  appliquées : pas besoin de les recopier.
+* Le proxy local traite une requête HTTP par connexion (``Connection: close``)
+  et ne relaie pas vers un proxy SOCKS.

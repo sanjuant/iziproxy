@@ -19,6 +19,7 @@ import urllib.request
 import pytest
 
 from iziproxy import IziProxy, LocalProxy
+from iziproxy.proxy_utils import basic_proxy_authorization
 
 
 def env_opener():
@@ -40,11 +41,28 @@ def via_local(local, url):
     (urllib pourrait contourner tout proxy pour 127.0.0.1)."""
     conn = http.client.HTTPConnection(local.host, local.port, timeout=10)
     try:
-        conn.request("GET", url)
+        conn.request("GET", url, headers=token_header(local))
         response = conn.getresponse()
         return response.status, response.read()
     finally:
         conn.close()
+
+
+def token_header(local):
+    """En-tête Proxy-Authorization portant le jeton du proxy local."""
+    auth = basic_proxy_authorization(local.url)
+    return {"Proxy-Authorization": auth} if auth else {}
+
+
+def raw_request(local, raw):
+    """Envoie une requête brute (jeton ajouté après la ligne de requête) ; renvoie le statut."""
+    line, sep, rest = raw.partition(b"\r\n")
+    if sep:
+        headers = b"".join(f"{k}: {v}\r\n".encode() for k, v in token_header(local).items())
+        raw = line + sep + headers + rest
+    with socket.create_connection((local.host, local.port), timeout=5) as sock:
+        sock.sendall(raw)
+        return sock.recv(64).split(b" ")[1]
 
 
 def fetch_json(opener, url, data=None, headers=None):
@@ -75,7 +93,7 @@ def test_env_only_client_reaches_origin_through_ntlm(ntlm_izi, origin, tls_origi
     values = izi.set_environment_variables(local_proxy=True)
 
     assert os.environ["HTTPS_PROXY"] == os.environ["http_proxy"] == values["HTTP_PROXY"]
-    assert values["HTTP_PROXY"].startswith("http://127.0.0.1:")
+    assert values["HTTP_PROXY"].startswith("http://iziproxy:")
     status, data = fetch_json(env_opener(), server.url("/echo?q=1"))
 
     assert status == 200
@@ -102,7 +120,7 @@ def test_post_body_and_headers_are_relayed(ntlm_izi, origin):
 
 def test_chunked_response_and_status_are_relayed(ntlm_izi, origin):
     izi, _ = ntlm_izi
-    local = izi.start_local_proxy()
+    local = izi.start_local_proxy(port=0)
     opener = explicit_opener(local.url)
 
     with opener.open(origin.url("/chunked"), timeout=10) as response:
@@ -129,7 +147,7 @@ def test_wrong_ntlm_password_gives_502(make_proxy, origin):
     pytest.importorskip("spnego")
     proxy = make_proxy(auth="ntlm")
     izi = IziProxy(proxy_url=proxy.url, username=proxy.username, password="wrong", domain=proxy.domain)
-    with izi.start_local_proxy() as local:
+    with izi.start_local_proxy(port=0) as local:
         with pytest.raises(urllib.error.HTTPError) as info:
             explicit_opener(local.url).open(origin.url(), timeout=10)
     assert info.value.code == 502
@@ -155,7 +173,7 @@ def test_curl_through_ntlm(ntlm_izi, tls_origin):
 # ---------------------------------------------------------------------- #
 def test_excluded_host_goes_direct(ntlm_izi, origin):
     izi, proxy = ntlm_izi
-    with izi.start_local_proxy() as local:
+    with izi.start_local_proxy(port=0) as local:
         # 127.0.0.1 est toujours exclu : le proxy local s'y connecte directement
         status, body = via_local(local, origin.url(host="127.0.0.1"))
     assert status == 200
@@ -184,7 +202,7 @@ def test_upstream_refusal_is_relayed(make_proxy, tls_origin):
     proxy = make_proxy(auth="basic")
     # Pas d'identifiants et pas de saisie : le 407 du proxy amont est relayé
     izi = IziProxy(proxy_url=proxy.url, auth_type="basic", interactive=False)
-    with izi.start_local_proxy() as local:
+    with izi.start_local_proxy(port=0) as local:
         with pytest.raises(OSError) as info:
             env = urllib.request.build_opener(urllib.request.ProxyHandler({"https": local.url}))
             env.open(tls_origin.url(), timeout=10)
@@ -193,12 +211,12 @@ def test_upstream_refusal_is_relayed(make_proxy, tls_origin):
 
 def test_unauthenticated_proxy_and_direct_configuration(make_proxy, origin):
     proxy = make_proxy()
-    with IziProxy(proxy_url=proxy.url).start_local_proxy() as local:
+    with IziProxy(proxy_url=proxy.url).start_local_proxy(port=0) as local:
         assert fetch_json(explicit_opener(local.url), origin.url())[0] == 200
     assert len(proxy.log) == 1
 
     # Sans aucun proxy configuré, le proxy local se connecte directement
-    with IziProxy().start_local_proxy() as local:
+    with IziProxy().start_local_proxy(port=0) as local:
         assert via_local(local, origin.url(host="127.0.0.1"))[0] == 200
 
 
@@ -235,11 +253,12 @@ def test_handle_api_and_context_manager(make_proxy):
     proxy = make_proxy()
     izi = IziProxy(proxy_url=proxy.url)
     with izi:
-        local = izi.start_local_proxy()
+        local = izi.start_local_proxy(port=0)
         assert isinstance(local, LocalProxy)
         assert local.running and local.host == "127.0.0.1" and local.port > 0
-        assert local.url == f"http://127.0.0.1:{local.port}"
-        assert "running" in repr(local)
+        assert local.address == f"http://127.0.0.1:{local.port}"
+        assert local.url == f"http://iziproxy:{local.token}@127.0.0.1:{local.port}"
+        assert "running" in repr(local) and local.token not in repr(local)
     # IziProxy.__exit__ arrête les proxys locaux
     assert not local.running
     local.stop()  # idempotent
@@ -273,16 +292,44 @@ def test_loop_to_itself_is_detected(make_proxy, origin):
 ])
 def test_invalid_requests_get_400(make_proxy, raw, status):
     proxy = make_proxy()
-    with IziProxy(proxy_url=proxy.url).start_local_proxy() as local:
-        with socket.create_connection((local.host, local.port), timeout=5) as sock:
-            sock.sendall(raw)
-            assert sock.recv(64).split(b" ")[1] == status
+    with IziProxy(proxy_url=proxy.url).start_local_proxy(port=0) as local:
+        assert raw_request(local, raw) == status
 
 
 def test_unreachable_target_gives_502(make_proxy):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         dead_port = probe.getsockname()[1]
-    with IziProxy().start_local_proxy(timeout=3) as local:
+    with IziProxy().start_local_proxy(port=0, timeout=3) as local:
         status, _ = via_local(local, f"http://127.0.0.1:{dead_port}/")
     assert status == 502
+
+
+def test_default_port_is_cntlm_port(make_proxy):
+    from iziproxy.local_proxy import DEFAULT_PORT
+
+    assert DEFAULT_PORT == 3128
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", DEFAULT_PORT))
+        except OSError:
+            pytest.skip("port 3128 already in use on this machine")
+    with IziProxy(proxy_url=make_proxy().url).start_local_proxy() as local:
+        assert local.port == DEFAULT_PORT
+        assert local.address == "http://127.0.0.1:3128"
+
+
+def test_busy_port_gives_clear_error(make_proxy):
+    izi = IziProxy(proxy_url=make_proxy().url)
+    with izi.start_local_proxy(port=0) as first:
+        with pytest.raises(OSError, match="port=0"):
+            izi.start_local_proxy(port=first.port)
+
+
+def test_serve_forever_returns_after_stop(make_proxy):
+    import threading
+
+    local = IziProxy(proxy_url=make_proxy().url).start_local_proxy(port=0)
+    threading.Timer(0.3, local.stop).start()
+    local.serve_forever()
+    assert not local.running

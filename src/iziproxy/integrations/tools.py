@@ -9,6 +9,8 @@ partagé, qui applique le PAC, les exclusions et l'authentification.
 
 from urllib.parse import urlsplit
 
+from ..local_proxy import TOKEN_USERNAME
+
 
 def _uses_proxy(izi):
     """True si une URL quelconque peut avoir besoin d'un proxy."""
@@ -49,6 +51,13 @@ def grpc_options(izi, target, secure=True):
 
 def selenium_proxy(izi):
     """
+    Proxy pour Selenium.
+
+    Chrome et Firefox pilotés ne savent pas envoyer d'identifiants à un
+    proxy configuré par WebDriver : ils utilisent un proxy local partagé
+    **sans jeton**, que tout processus de la machine peut emprunter tant
+    qu'il tourne (voir la section Sécurité de la documentation).
+
     Returns:
         selenium.webdriver.common.proxy.Proxy: Proxy manuel vers le proxy
         local partagé, ou connexion directe
@@ -57,15 +66,18 @@ def selenium_proxy(izi):
 
     if not _uses_proxy(izi):
         return Proxy({"proxyType": "DIRECT"})
-    address = izi.local_proxy_url().split("://", 1)[1]
+    address = izi.local_proxy_url(token=False).split("://", 1)[1]
     return Proxy({"proxyType": "MANUAL", "httpProxy": address, "sslProxy": address})
 
 
 def playwright_proxy(izi):
     """
+    Proxy pour Playwright, qui transmet lui-même le jeton du proxy local.
+
     Returns:
-        dict|None: {"server": url} pour Playwright, None sans proxy
+        dict|None: {"server", "username", "password"} pour Playwright, None sans proxy
     """
     if not _uses_proxy(izi):
         return None
-    return {"server": izi.local_proxy_url()}
+    local = izi._shared_local_proxy()
+    return {"server": local.address, "username": TOKEN_USERNAME, "password": local.token}

@@ -37,13 +37,8 @@ pytest --cov=iziproxy
 
 ## Formatage du code
 
-Nous utilisons Black pour le formatage du code :
-
-```bash
-black src tests
-```
-
-Et Flake8 pour la vérification de la qualité du code :
+Flake8 vérifie le code (configuration dans `.flake8` : lignes de 120
+caractères au plus) :
 
 ```bash
 flake8 src tests
@@ -60,9 +55,14 @@ flake8 src tests
 
 ## Conventions de codage
 
-- Suivez la norme PEP 8
-- Utilisez des docstrings au format Google pour documenter les classes et fonctions
-- Ajoutez des commentaires lorsque le code n'est pas évident
-- Écrivez des tests unitaires pour chaque nouvelle fonctionnalité
+- Code (noms, messages de journal et d'erreur) en anglais ; commentaires et
+  docstrings (format Google) en français
+- Suivez la norme PEP 8 (vérifiée par flake8)
+- Les tests ne doivent dépendre ni du réseau externe ni de la configuration
+  de la machine : préférez les vrais serveurs de `tests/servers.py` aux mocks
+- Toute fonctionnalité nouvelle s'accompagne de tests et d'une mise à jour
+  de la documentation (`README.md`, `docs/source/`)
+- Un changement qui touche aux identifiants ou au proxy local doit respecter
+  les garanties décrites dans `docs/source/security.rst`
 
 Merci pour votre contribution !

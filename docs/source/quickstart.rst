@@ -44,7 +44,9 @@ Les variables d'environnement pointent vers un **proxy local** sur
 ``127.0.0.1`` (voir :doc:`usage`), jamais vers le proxy d'entreprise avec un
 mot de passe : celui-ci n'apparaît donc ni dans ``os.environ`` ni dans
 l'environnement des sous-processus, et NTLM ou un PAC fonctionnent même pour
-les outils qui n'en savent rien.
+les outils qui n'en savent rien. Ce proxy local exige un jeton aléatoire,
+inclus dans les variables : les autres utilisateurs de la machine ne peuvent
+pas s'en servir (voir :doc:`security`).
 
 Sans proxy
 ^^^^^^^^^^
@@ -64,7 +66,7 @@ Vérifier ce qui a été fait
    # proxy http://proxy.corp:8080 (ntlm) ; local http://127.0.0.1:53211 ; requests, urllib, environment
 
    installation.active            # False : aucun proxy, rien n'a été modifié
-   installation.local_proxy_url   # 'http://127.0.0.1:53211'
+   installation.local_proxy_url   # 'http://iziproxy:<jeton>@127.0.0.1:53211'
    installation.environment       # variables définies
    installation.proxy             # l'instance IziProxy utilisée
 

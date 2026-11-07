@@ -12,7 +12,8 @@ Choix du proxy pour chaque requête
 3. sinon le proxy explicite ou système est utilisé.
 
 Les directives PAC ``PROXY``, ``HTTPS``, ``SOCKS``, ``SOCKS5`` et ``DIRECT``
-sont prises en charge (``SOCKS`` nécessite ``requests[socks]``).
+sont prises en charge (``SOCKS`` nécessite ``requests[socks]`` et n'est pas
+relayé par le proxy local).
 
 Détection de l'authentification
 -------------------------------
@@ -56,13 +57,16 @@ Proxy local
 ``start_local_proxy()`` lance un serveur ``socketserver`` multi-thread sur
 ``127.0.0.1``. Pour chaque connexion cliente :
 
+* le jeton est vérifié (``Proxy-Authorization: Basic``, comparaison à temps
+  constant) ; sans lui, réponse ``407`` ;
 * ``CONNECT hôte:port`` : la route est celle de ``https://hôte:port/``. En
   direct, le proxy local se connecte à la cible ; via un proxy NTLM, il
   réutilise la négociation de l'adaptateur NTLM (``open_tunnel()``) ; via un
   proxy Basic, il envoie ``CONNECT`` avec ``Proxy-Authorization``. Une fois le
   tunnel établi, les octets sont relayés sans être lus.
 * requête HTTP en forme absolue : le corps (``Content-Length`` ou
-  ``chunked``) est lu, les en-têtes propres au saut (``Connection``,
+  ``chunked``) est lu en entier (un corps tronqué ou une longueur invalide
+  donnent ``400``), les en-têtes propres au saut (``Connection``,
   ``Proxy-Authorization``...) sont retirés, puis la requête est envoyée en
   forme d'origine (direct) ou absolue (proxy) avec la même négociation NTLM.
   La réponse est relayée avec ``Connection: close`` : une requête par
@@ -79,4 +83,4 @@ Journalisation
 IziProxy n'ajoute aucun handler par défaut : configurez le logger
 ``iziproxy`` comme les autres, ou utilisez ``debug=True`` /
 ``set_debug(True)`` pour afficher les journaux détaillés sur stderr. Les mots
-de passe n'apparaissent jamais dans les journaux.
+de passe et le jeton du proxy local n'apparaissent jamais dans les journaux.

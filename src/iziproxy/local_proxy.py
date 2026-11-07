@@ -12,27 +12,46 @@ proxy HTTP sur 127.0.0.1 qui :
   (NTLM / Negotiate via pyspnego, ou Basic).
 
 Les clients n'ont donc besoin d'aucun identifiant : il suffit de pointer
-leurs variables d'environnement vers http://127.0.0.1:<port>.
+leurs variables d'environnement vers http://127.0.0.1:<port> (3128 par
+défaut, comme cntlm).
+
+Sécurité : le proxy n'écoute que sur la boucle locale et, par défaut, exige
+un jeton aléatoire (Basic, utilisateur « iziproxy »). Ce jeton figure dans
+``LocalProxy.url`` : les clients qui reçoivent cette URL l'envoient d'eux-
+mêmes, tandis qu'un autre utilisateur de la machine (poste partagé, serveur
+Citrix) ne peut pas emprunter votre identité auprès du proxy d'entreprise.
 
 Limites : une requête HTTP par connexion cliente (la réponse est renvoyée
-avec « Connection: close ») ; le proxy n'exige aucune authentification de
-ses clients et n'écoute que sur la boucle locale.
+avec « Connection: close ») ; pas de relais vers un proxy SOCKS.
 """
 
+import base64
+import binascii
+import hmac
 import http.client
 import logging
+import re
+import secrets
 import socket
 import socketserver
 import threading
 from urllib.parse import urlsplit
 
 from .ntlm_auth import NtlmProxyAdapter
-from .proxy_utils import basic_proxy_authorization, is_https_proxy, proxy_host_port
+from .proxy_utils import basic_proxy_authorization, is_https_proxy, proxy_host_port, strip_credentials
 
 logger = logging.getLogger("iziproxy")
 
 LISTEN_HOST = "127.0.0.1"
+# Port par défaut de IziProxy.start_local_proxy() : celui de cntlm et squid,
+# déjà connu de la plupart des outils configurés pour un proxy local
+DEFAULT_PORT = 3128
 _LOOPBACK_NAMES = (LISTEN_HOST, "localhost", "::1")
+
+# Nom d'utilisateur placé devant le jeton dans l'URL du proxy local
+TOKEN_USERNAME = "iziproxy"
+# Caractères autorisés dans un jeton fourni (aucun encodage d'URL nécessaire)
+_TOKEN_RE = re.compile(r"[A-Za-z0-9._~-]{16,}")
 
 # En-têtes propres à un saut (RFC 9110 §7.6.1) : jamais relayés tels quels
 _HOP_BY_HOP = {
@@ -53,6 +72,10 @@ class _BadRequest(Exception):
 
 class _LoopDetected(Exception):
     """La route choisie renvoie vers le proxy local lui-même."""
+
+
+class _UnsupportedRoute(Exception):
+    """La route choisie passe par un proxy que le proxy local ne sait pas joindre."""
 
 
 # ---------------------------------------------------------------------- #
@@ -102,8 +125,17 @@ def _read_chunked(rfile):
             while _read_line(rfile).strip():
                 pass
             return b"".join(chunks)
-        chunks.append(rfile.read(size))
-        rfile.read(2)  # CRLF de fin de bloc
+        chunks.append(_read_exact(rfile, size))
+        if _read_exact(rfile, 2) != b"\r\n":
+            raise _BadRequest("Invalid chunk terminator")
+
+
+def _read_exact(rfile, size):
+    """Lit exactement size octets (une connexion fermée avant est une erreur)."""
+    data = rfile.read(size)
+    if len(data) != size:
+        raise _BadRequest("Connection closed before the end of the body")
+    return data
 
 
 def _header(headers, name):
@@ -120,11 +152,10 @@ def _read_body(rfile, headers):
         return _read_chunked(rfile)
     length = _header(headers, "Content-Length")
     if length:
-        try:
-            length = int(length)
-        except ValueError as exc:
-            raise _BadRequest("Invalid Content-Length") from exc
-        return rfile.read(length)
+        # int() accepterait « -1 » ou « +5 » : rfile.read(-1) lirait jusqu'à la fermeture
+        if not length.strip().isdigit():
+            raise _BadRequest("Invalid Content-Length")
+        return _read_exact(rfile, int(length))
     return b""
 
 
@@ -168,17 +199,23 @@ class _Handler(socketserver.StreamRequestHandler):
 
     def setup(self):
         super().setup()
+        self.replied = False
         self.connection.settimeout(self.server.local_proxy.timeout)
 
     # -------------------------------------------------------------- #
     # Réponses locales
     # -------------------------------------------------------------- #
-    def _reply(self, status, reason, message=""):
+    def _reply(self, status, reason, message="", extra_headers=()):
+        if self.replied:
+            # Une réponse est déjà partie : une seconde corromprait le flux
+            return
+        self.replied = True
         body = (message + "\n").encode("utf-8") if message else b""
         head = (f"HTTP/1.1 {status} {reason}\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n"
                 f"Content-Length: {len(body)}\r\n"
-                "Connection: close\r\n\r\n")
+                + "".join(f"{name}: {value}\r\n" for name, value in extra_headers)
+                + "Connection: close\r\n\r\n")
         try:
             self.wfile.write(head.encode("latin-1") + body)
             self.wfile.flush()
@@ -198,6 +235,7 @@ class _Handler(socketserver.StreamRequestHandler):
             lines.append(f"{name}: {value}")
         # Le corps est renvoyé tel quel puis la connexion est fermée
         lines.append("Connection: close")
+        self.replied = True
         self.wfile.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
         if method != "HEAD" and response.status not in (204, 304):
             while True:
@@ -223,6 +261,12 @@ class _Handler(socketserver.StreamRequestHandler):
             method = method.upper()
             headers = _read_headers(self.rfile)
 
+            if not proxy._authorized(headers):
+                self._reply(407, "Proxy Authentication Required",
+                            "This local proxy requires the token included in its URL",
+                            [("Proxy-Authenticate", f'Basic realm="{TOKEN_USERNAME}"')])
+                return
+
             if method == "CONNECT":
                 self._handle_connect(proxy, target)
             else:
@@ -231,6 +275,8 @@ class _Handler(socketserver.StreamRequestHandler):
             self._reply(400, "Bad Request", str(exc))
         except _LoopDetected as exc:
             self._reply(508, "Loop Detected", str(exc))
+        except _UnsupportedRoute as exc:
+            self._reply(502, "Bad Gateway", str(exc))
         except socket.timeout as exc:
             logger.debug("Local proxy: timeout (%s)", exc)
             self._reply(504, "Gateway Timeout", "Upstream timed out")
@@ -254,6 +300,7 @@ class _Handler(socketserver.StreamRequestHandler):
             return
 
         try:
+            self.replied = True
             self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
             self.wfile.flush()
             upstream.settimeout(None)
@@ -294,31 +341,53 @@ class LocalProxy:
 
     Ne pas instancier directement : utiliser IziProxy.start_local_proxy().
 
+    Attributs : ``url`` (à placer dans HTTP(S)_PROXY, jeton inclus),
+    ``address`` (sans jeton), ``host``, ``port``, ``token``, ``running``.
+
     Exemple :
         >>> with IziProxy().start_local_proxy() as local:
         ...     subprocess.run(["pip", "install", "x"],
         ...                    env=dict(os.environ, HTTPS_PROXY=local.url))
     """
 
-    def __init__(self, izi, port=0, timeout=30.0):
+    def __init__(self, izi, port=0, timeout=30.0, token=True):
         """
         Args:
             izi (IziProxy): Instance qui fournit la route et les identifiants
             port (int): Port d'écoute sur 127.0.0.1 (0 : port libre au hasard)
             timeout (float): Délai de connexion / lecture vers l'amont (secondes)
+            token (bool|str): Jeton exigé des clients. True (défaut) : jeton
+                aléatoire ; une chaîne : ce jeton (16 caractères ou plus parmi
+                lettres, chiffres et ``._~-``) ; False : aucun contrôle, tout
+                processus local peut alors utiliser votre identité
         """
+        if token is True:
+            token = secrets.token_urlsafe(24)
+        elif not token:
+            token = None
+        elif not isinstance(token, str) or not _TOKEN_RE.fullmatch(token):
+            raise ValueError("token must be True, False or a string of at least 16 characters "
+                             "among letters, digits and ._~-")
+        self.token = token
         self.izi = izi
         self.timeout = timeout
         self._ntlm_adapter = None
         self._lock = threading.Lock()
-        self._server = _Server((LISTEN_HOST, port), _Handler)
+        try:
+            self._server = _Server((LISTEN_HOST, port), _Handler)
+        except OSError as exc:
+            # Port déjà pris (autre proxy local, cntlm, seconde instance...)
+            raise OSError(exc.errno, f"Cannot listen on {LISTEN_HOST}:{port} ({exc.strerror or exc}); "
+                                     "choose another port with start_local_proxy(port=...) "
+                                     "or port=0 for any free port") from exc
         self._server.local_proxy = self
         self.host, self.port = self._server.server_address[:2]
         self._thread = None
 
     def __repr__(self):
         state = "running" if self.running else "stopped"
-        return f"LocalProxy(url={self.url!r}, {state})"
+        protection = "token" if self.token else "no token"
+        return f"LocalProxy(address={self.address!r}, {protection}, {state})"
 
     def __enter__(self):
         return self
@@ -328,9 +397,31 @@ class LocalProxy:
         return False
 
     @property
-    def url(self):
-        """URL à placer dans HTTP(S)_PROXY."""
+    def address(self):
+        """Adresse du proxy sans jeton (http://127.0.0.1:port), pour l'affichage."""
         return f"http://{self.host}:{self.port}"
+
+    @property
+    def url(self):
+        """URL à placer dans HTTP(S)_PROXY (jeton inclus s'il est exigé)."""
+        if self.token is None:
+            return self.address
+        return f"http://{TOKEN_USERNAME}:{self.token}@{self.host}:{self.port}"
+
+    def _authorized(self, headers):
+        """Vérifie le jeton envoyé par le client (Proxy-Authorization Basic)."""
+        if self.token is None:
+            return True
+        scheme, _, encoded = (_header(headers, "Proxy-Authorization") or "").strip().partition(" ")
+        if scheme.lower() != "basic":
+            return False
+        try:
+            decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return False
+        _, _, password = decoded.partition(":")
+        # Comparaison à temps constant : la durée ne renseigne pas sur le jeton
+        return hmac.compare_digest(password.encode("utf-8"), self.token.encode("utf-8"))
 
     @property
     def running(self):
@@ -347,20 +438,41 @@ class LocalProxy:
                 daemon=True,
             )
             self._thread.start()
-            logger.info("Local proxy listening on %s", self.url)
+            logger.info("Local proxy listening on %s (%s)", self.address,
+                        "token required" if self.token else "no token: open to every local process")
         return self
+
+    def serve_forever(self):
+        """
+        Bloque jusqu'à Ctrl+C ou stop(), puis arrête le proxy.
+
+        Pour un script dont le seul rôle est de faire tourner le proxy local
+        (remplaçant de cntlm) ; démarre le proxy s'il ne l'est pas encore.
+        """
+        self.start()
+        thread = self._thread
+        try:
+            # join() par petites tranches : Ctrl+C reste pris en compte sous Windows
+            while thread is not None and thread.is_alive():
+                thread.join(0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
 
     def stop(self):
         """Arrête le proxy (les tunnels déjà ouverts se terminent seuls)."""
-        if self._thread is None:
+        # Un seul appelant effectue l'arrêt (stop() concurrent, serve_forever())
+        with self._lock:
+            thread, self._thread = self._thread, None
+        if thread is None:
             return
         self._server.shutdown()
         self._server.server_close()
-        self._thread.join()
-        self._thread = None
+        thread.join()
         if self._ntlm_adapter is not None:
             self._ntlm_adapter.close()
-        logger.info("Local proxy on %s stopped", self.url)
+        logger.info("Local proxy on %s stopped", self.address)
 
     # -------------------------------------------------------------- #
     # Choix de la route
@@ -376,9 +488,13 @@ class LocalProxy:
         proxy = proxies.get(scheme) or proxies.get("https") or proxies.get("http")
         if not proxy:
             return None, "direct"
+        scheme = urlsplit(proxy).scheme.lower()
+        if scheme not in ("http", "https"):
+            raise _UnsupportedRoute(f"The local proxy cannot relay through a {scheme}:// proxy "
+                                    f"(chosen for {url})")
         host, port = proxy_host_port(proxy)
         if port == self.port and host in _LOOPBACK_NAMES:
-            raise _LoopDetected(f"The proxy chosen for {url} is this local proxy ({self.url})")
+            raise _LoopDetected(f"The proxy chosen for {url} is this local proxy ({self.address})")
         if self.izi._uses_ntlm():
             return proxy, "ntlm"
         return proxy, "basic"
@@ -421,7 +537,7 @@ class LocalProxy:
         """
         url = f"https://{authority}/"
         proxy, mode = self._route(url)
-        logger.debug("Local proxy: CONNECT %s via %s", authority, proxy or "direct")
+        logger.debug("Local proxy: CONNECT %s via %s", authority, strip_credentials(proxy) or "direct")
 
         if mode == "direct":
             return self._connect(host, port), None
@@ -481,7 +597,7 @@ class LocalProxy:
         """
         absolute = target.split("#", 1)[0]
         proxy, mode = self._route(absolute)
-        logger.debug("Local proxy: %s %s via %s", method, absolute, proxy or "direct")
+        logger.debug("Local proxy: %s %s via %s", method, absolute, strip_credentials(proxy) or "direct")
 
         if mode == "ntlm":
             def http_leg(sock, auth_header):

@@ -13,10 +13,13 @@ _URL_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*)://(.*)$", re.DOTALL)
 
 class SecurePassword:
     """
-    Mot de passe chiffré en mémoire et masqué dans str()/repr().
+    Mot de passe masqué dans str()/repr() et non stocké en clair.
 
-    Le chiffrement évite que le mot de passe apparaisse en clair dans un
-    vidage mémoire ou un journal ; get_password() le restitue.
+    Le chiffrement évite surtout les fuites accidentelles : journaux,
+    tracebacks, repr() dans un débogueur, recherche naïve dans un vidage
+    mémoire. Ce n'est pas une protection contre un attaquant capable de lire
+    la mémoire du processus : la clé est conservée à côté du jeton chiffré.
+    get_password() restitue le mot de passe.
     """
 
     __slots__ = ("_SecurePassword__key", "_SecurePassword__token")

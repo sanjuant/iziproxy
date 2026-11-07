@@ -67,23 +67,59 @@ Proxy local pour les outils externes
 
 Comme cntlm ou px, IziProxy peut démarrer un proxy HTTP sur ``127.0.0.1``
 qui s'authentifie auprès du proxy d'entreprise à la place de pip, git, curl,
-conda... Ces outils n'ont besoin que de ``HTTP(S)_PROXY``.
+conda, d'un navigateur... Ces outils n'ont besoin que de son adresse.
+
+Remplacer cntlm en trois lignes
+"""""""""""""""""""""""""""""""
 
 .. code-block:: python
 
-   proxy.set_environment_variables(local_proxy=True)
+   from iziproxy import IziProxy
+
+   local = IziProxy().start_local_proxy()   # http://127.0.0.1:3128
+   print("Proxy local :", local.url)
+   local.serve_forever()                    # Ctrl+C pour arrêter
+
+* **Port** : ``3128`` par défaut, comme cntlm. ``start_local_proxy(port=8888)``
+  pour un autre port, ``port=0`` pour un port libre choisi par le système
+  (lu ensuite dans ``local.port``). Un port déjà pris (cntlm encore lancé,
+  seconde instance) lève ``OSError``.
+* **Jeton** : aléatoire à chaque démarrage et inclus dans ``local.url``. Pour
+  configurer les outils une fois pour toutes, fixez-le :
+  ``start_local_proxy(token="un-jeton-long-et-secret")``, puis par exemple
+  ``git config --global http.proxy http://iziproxy:un-jeton-long-et-secret@127.0.0.1:3128``.
+* ``serve_forever()`` bloque jusqu'à Ctrl+C (ou ``stop()`` depuis un autre
+  thread), puis arrête le proxy. Script complet : :doc:`examples`.
+
+Depuis un programme Python
+""""""""""""""""""""""""""
+
+.. code-block:: python
+
+   proxy.set_environment_variables(local_proxy=True)   # port libre au hasard
    subprocess.run(["pip", "install", "paquet"], check=True)
    proxy.clear_environment_variables()   # arrête aussi le proxy local
 
-   # Gestion explicite (port fixe, plusieurs processus...)
-   with proxy.start_local_proxy(port=3128) as local:
+   # Gestion explicite, le temps d'un bloc
+   with proxy.start_local_proxy() as local:
        env = dict(os.environ, HTTP_PROXY=local.url, HTTPS_PROXY=local.url)
        subprocess.run(["git", "fetch"], env=env, check=True)
 
-``start_local_proxy()`` retourne un :class:`iziproxy.LocalProxy` (``url``,
-``host``, ``port``, ``running``, ``stop()``, gestionnaire de contexte). Les
-proxys locaux encore actifs sont arrêtés en sortie d'un bloc ``with proxy:``
-ou par ``stop_local_proxies()``.
+``start_local_proxy()`` retourne un :class:`iziproxy.LocalProxy` :
+
+* ``url`` : à placer dans ``HTTP(S)_PROXY``. Elle contient un jeton
+  (``http://iziproxy:<jeton>@127.0.0.1:3128``) que les outils renvoient
+  d'eux-mêmes ; sans lui, le proxy local répond ``407`` (voir :doc:`security`) ;
+* ``address`` : la même adresse sans jeton, pour l'affichage ;
+* ``host``, ``port``, ``token``, ``running`` ;
+* ``serve_forever()``, ``stop()``, gestionnaire de contexte.
+
+``install()``, ``set_environment_variables(local_proxy=True)`` et les
+adaptateurs (aiohttp, navigateurs...) démarrent leur propre proxy local sur un
+port libre au hasard : ils ne gênent pas un proxy local lancé sur 3128.
+
+Les proxys locaux encore actifs sont arrêtés en sortie d'un bloc
+``with proxy:`` ou par ``stop_local_proxies()``.
 
 Patch global de requests
 ^^^^^^^^^^^^^^^^^^^^^^^^

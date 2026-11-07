@@ -12,7 +12,7 @@ import requests
 from .adapters import IziProxyAdapter
 from .config_manager import ConfigManager
 from .env_detector import EnvironmentDetector, normalize_environment
-from .local_proxy import LocalProxy
+from .local_proxy import DEFAULT_PORT, LocalProxy
 from .logger import enable_debug_logging, disable_debug_logging, get_logger
 from .proxy_detector import ProxyDetector
 from .proxy_utils import (
@@ -119,14 +119,24 @@ class IziProxy:
         self._pac_results = {}
         self._saved_env = None
         self._env_local_proxy = None
-        self._shared_local_proxy = None
+        # Proxys locaux partagés par les adaptateurs : {avec_jeton: LocalProxy}
+        self._shared_local_proxies = {}
         self._local_proxies = []
         self._warned = set()
 
         logger.debug("IziProxy initialized (environment: %s)", self.current_env)
 
     def __repr__(self):
-        return f"IziProxy(environment={self.current_env!r}, proxy={self.get_proxy_url()!r})"
+        # Pas de détection ici : un repr() (débogueur, journal) ne doit ni
+        # télécharger de PAC ni interroger le système
+        settings = self._settings
+        if settings is None:
+            proxy = "<not resolved yet>"
+        elif settings["source"] == "pac":
+            proxy = f"PAC {strip_credentials(settings['pac_url'])}"
+        else:
+            proxy = strip_credentials(settings.get("https")) or "direct"
+        return f"IziProxy(environment={self.current_env!r}, proxy={proxy!r})"
 
     def __enter__(self):
         return self
@@ -146,7 +156,11 @@ class IziProxy:
         if isinstance(value, bool):
             return value
         if isinstance(value, str) and value.strip():
-            return os.path.expanduser(value.strip())
+            path = os.path.expanduser(value.strip())
+            # Erreur immédiate plutôt qu'à la première requête via le proxy
+            if not os.path.exists(path):
+                raise ValueError(f"CA bundle not found: {path}")
+            return path
         raise ValueError(f"Invalid verify value {value!r}: expected True, False or a CA bundle path")
 
     def _proxy_ssl_context(self):
@@ -495,7 +509,7 @@ class IziProxy:
         """
         return self.configure_session(requests.Session())
 
-    def start_local_proxy(self, port=0, timeout=30.0):
+    def start_local_proxy(self, port=DEFAULT_PORT, timeout=30.0, token=True):
         """
         Démarre un proxy local (façon cntlm / px) sur 127.0.0.1.
 
@@ -505,19 +519,26 @@ class IziProxy:
         URL comme create_session() (no_proxy, PAC, connexion directe) et
         s'authentifie à leur place.
 
+        Par défaut, le proxy local exige un jeton aléatoire, inclus dans
+        ``LocalProxy.url`` : les autres utilisateurs de la machine ne peuvent
+        pas s'en servir pour emprunter votre identité.
+
         La détection de l'authentification et la recherche des identifiants
         (éventuelle saisie interactive) ont lieu ici, dans le thread appelant.
 
         Args:
-            port (int): Port d'écoute (0 : port libre choisi par le système)
+            port (int): Port d'écoute sur 127.0.0.1 (défaut : 3128, comme
+                cntlm ; 0 : port libre choisi par le système). OSError si le
+                port est déjà pris
             timeout (float): Délai de connexion / lecture vers l'amont (secondes)
+            token (bool|str): Jeton exigé des clients (voir LocalProxy)
 
         Returns:
-            LocalProxy: Proxy démarré (url, port, stop(), gestionnaire de contexte)
+            LocalProxy: Proxy démarré (url, address, port, stop(), gestionnaire de contexte)
         """
         if self._raw_proxies() and self._auth_settings()["required"]:
             self._get_credentials()
-        local = LocalProxy(self, port=port, timeout=timeout).start()
+        local = LocalProxy(self, port=port, timeout=timeout, token=token).start()
         with self._lock:
             self._local_proxies = [p for p in self._local_proxies if p.running]
             self._local_proxies.append(local)
@@ -528,29 +549,40 @@ class IziProxy:
         with self._lock:
             proxies, self._local_proxies = self._local_proxies, []
             self._env_local_proxy = None
-            self._shared_local_proxy = None
+            self._shared_local_proxies = {}
         for local in proxies:
             local.stop()
 
     # ------------------------------------------------------------------ #
     # API publique : autres clients HTTP
     # ------------------------------------------------------------------ #
-    def local_proxy_url(self):
+    def _shared_local_proxy(self, token=True):
+        """Proxy local partagé (avec ou sans jeton), démarré à la première demande."""
+        key = bool(token)
+        with self._lock:
+            local = self._shared_local_proxies.get(key)
+            if local is None or not local.running:
+                local = self._shared_local_proxies[key] = self.start_local_proxy(port=0, token=key)
+            return local
+
+    def local_proxy_url(self, token=True):
         """
         URL d'un proxy local partagé (démarré à la première demande, arrêté
         par stop_local_proxies() ou en sortie de bloc ``with``).
 
         Il sert aux clients qui ne savent pas parler NTLM ou évaluer un PAC :
-        navigateurs, aiohttp, gRPC...
+        aiohttp, gRPC, websockets, navigateurs...
+
+        Args:
+            token (bool): Exiger le jeton (défaut). False seulement pour un
+                client incapable d'envoyer des identifiants au proxy (Chrome
+                piloté par Selenium) : tout processus local pourra alors
+                utiliser ce proxy, donc votre identité
 
         Returns:
-            str: URL du type http://127.0.0.1:port
+            str: http://iziproxy:<jeton>@127.0.0.1:port (ou sans jeton)
         """
-        with self._lock:
-            local = self._shared_local_proxy
-            if local is None or not local.running:
-                local = self._shared_local_proxy = self.start_local_proxy()
-            return local.url
+        return self._shared_local_proxy(token).url
 
     def proxy_for(self, url):
         """
@@ -762,7 +794,7 @@ class IziProxy:
         """Variables pointant vers le proxy local (démarré si nécessaire)."""
         local = self._env_local_proxy
         if local is None or not local.running:
-            local = self._env_local_proxy = self.start_local_proxy()
+            local = self._env_local_proxy = self.start_local_proxy(port=0)
         no_proxy = no_proxy_for_env(self._proxy_settings()["no_proxy"])
         return {
             "HTTP_PROXY": local.url, "http_proxy": local.url,

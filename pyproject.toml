@@ -63,7 +63,6 @@ dev = [
     "selenium>=4.0.0",
     "pytest>=6.0.0",
     "pytest-cov>=2.12.0",
-    "black>=22.0.0",
     "flake8>=4.0.0",
     "sphinx>=4.0.0",
     "sphinx-rtd-theme>=1.0.0",
@@ -80,7 +79,3 @@ where = ["src"]
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
-
-[tool.black]
-line-length = 88
-target-version = ['py38', 'py39', 'py310', 'py311', 'py312']

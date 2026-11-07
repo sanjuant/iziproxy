@@ -70,9 +70,10 @@ def test_proxy_for_ntlm_uses_shared_local_proxy(make_proxy):
     with IziProxy(proxy_url=proxy.url, username=proxy.username, password=proxy.password,
                   domain=proxy.domain) as izi:
         first = izi.proxy_for("https://example.org/")
-        assert first.startswith("http://127.0.0.1:") and first != proxy.url
+        assert first.startswith("http://iziproxy:") and first.endswith(
+            f"@127.0.0.1:{izi._shared_local_proxy().port}")
         assert izi.proxy_for("http://other.example/") == first
-    assert izi._shared_local_proxy is None
+    assert izi._shared_local_proxies == {}
 
 
 def test_proxy_for_direct_without_proxy():
@@ -322,13 +323,19 @@ def test_browser_helpers_use_local_proxy(make_proxy, origin):
     with IziProxy(proxy_url=proxy.url, username=proxy.username, password=proxy.password) as izi:
         playwright = izi.playwright_proxy()
         selenium = izi.selenium_proxy()
-        assert playwright["server"] == izi.local_proxy_url()
-        assert selenium.http_proxy == selenium.ssl_proxy == playwright["server"].split("://")[1]
+        # Playwright transmet le jeton ; Chrome via Selenium ne le peut pas
+        local = izi._shared_local_proxy()
+        assert playwright == {"server": local.address, "username": "iziproxy", "password": local.token}
+        assert selenium.http_proxy == selenium.ssl_proxy
+        assert selenium.http_proxy != playwright["server"].split("://")[1]
+        assert izi.local_proxy_url(token=False) == "http://" + selenium.http_proxy
 
-        # Le proxy local fourni aux navigateurs authentifie réellement les requêtes
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": playwright["server"]}))
-        with opener.open(origin.url(), timeout=10) as response:
-            assert response.status == 200
+        # Les proxys locaux fournis aux navigateurs authentifient réellement les requêtes
+        with_token = f"http://iziproxy:{playwright['password']}@{playwright['server'].split('://')[1]}"
+        for proxy_url in (with_token, "http://" + selenium.http_proxy):
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url}))
+            with opener.open(origin.url(), timeout=10) as response:
+                assert response.status == 200
 
 
 def test_browser_helpers_direct():

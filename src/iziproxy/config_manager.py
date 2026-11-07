@@ -140,7 +140,44 @@ class ConfigManager:
         self._deep_merge(config, loaded)
         self.loaded_from = str(path)
         logger.info("Configuration loaded from %s", path)
+        self._warn_if_untrusted(path, loaded)
         return config
+
+    def _warn_if_untrusted(self, path, loaded):
+        """
+        Signale un fichier du répertoire courant qui choisit le proxy.
+
+        Un dépôt cloné peut contenir un iziproxy.yml : s'il désigne un proxy,
+        un PAC ou désactive la vérification TLS, tout le trafic (et
+        l'authentification NTLM / Basic) partirait vers ce proxy.
+        """
+        if self.config_path:
+            # Fichier désigné explicitement par l'application
+            return
+        try:
+            in_cwd = Path(path).resolve().parent == Path.cwd().resolve()
+        except OSError:
+            return
+        if not in_cwd:
+            return
+        sensitive = sorted(self._sensitive_keys(loaded))
+        if sensitive:
+            logger.warning(
+                "Configuration %s from the current directory sets %s: make sure you trust this "
+                "directory, or move the file to ~/.config/iziproxy.yml or pass config_path=",
+                path, ", ".join(sensitive))
+
+    @staticmethod
+    def _sensitive_keys(loaded):
+        """Clés qui décident où part le trafic ou comment il est vérifié."""
+        found = set()
+        if "verify" in loaded:
+            found.add("verify")
+        sources = [loaded] + [env for env in (loaded.get("environments") or {}).values()
+                              if isinstance(env, dict)]
+        for source in sources:
+            found.update(key for key in ("proxy_url", "pac_url") if source.get(key))
+        return found
 
     def _deep_merge(self, target, source):
         """Fusionne récursivement source dans target."""
