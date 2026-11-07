@@ -8,12 +8,34 @@ import platform
 import re
 import ssl
 import subprocess
+import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
 from .proxy_utils import build_ssl_context, normalize_proxy_url, parse_no_proxy
 
 logger = logging.getLogger("iziproxy")
+
+# Taille maximale d'un fichier PAC téléchargé (octets)
+MAX_PAC_SIZE = 5 * 1024 * 1024
+# Délai avant de retenter un PAC qui n'a pas pu être obtenu (secondes)
+PAC_RETRY_DELAY = 60.0
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """
+    Redirections du téléchargement PAC : http(s) uniquement, et jamais d'un
+    PAC https:// vers http:// (le contenu ne serait plus authentifié).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urlsplit(req.full_url).scheme.lower()
+        new = urlsplit(newurl).scheme.lower()
+        if new not in ("http", "https") or (old == "https" and new != "https"):
+            raise urllib.error.HTTPError(newurl, code, f"Refused PAC redirect from {old}:// to {new}://",
+                                         headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def parse_pac_result(value):
@@ -145,7 +167,14 @@ class ProxyDetector:
         valeur d'origine : après install(), relancer la détection ne doit
         pas renvoyer vers son propre proxy local.
         """
+        # httpoxy : en CGI, HTTP_PROXY vient de l'en-tête « Proxy: » envoyé par
+        # le client HTTP ; comme urllib, l'ignorer quand REQUEST_METHOD est défini.
+        # Sous Windows, http_proxy et HTTP_PROXY sont une seule et même variable
+        cgi = "REQUEST_METHOD" in os.environ
+
         def get(name):
+            if cgi and (name == "HTTP_PROXY" or (name == "http_proxy" and os.name == "nt")):
+                return None
             if name in self.env_overrides:
                 return self.env_overrides[name]
             return os.environ.get(name)
@@ -345,22 +374,39 @@ class ProxyDetector:
         Returns:
             str|None: URL du proxy, None pour une connexion directe ou en cas d'échec
         """
+        return self.evaluate_pac(url, pac_url)[0]
+
+    def evaluate_pac(self, url, pac_url):
+        """
+        Évalue un fichier PAC et indique si le résultat peut être mémorisé.
+
+        Returns:
+            tuple: (URL du proxy|None, fiable) ; fiable vaut False quand le PAC
+            n'a pas pu être obtenu ou évalué (le None est alors un repli)
+        """
         pac = self._load_pac(pac_url)
         if pac is None:
-            return None
+            return None, False
         host = urlsplit(url).hostname or ""
         try:
-            return parse_pac_result(pac.find_proxy_for_url(url, host))
+            return parse_pac_result(pac.find_proxy_for_url(url, host)), True
         except Exception as exc:
             logger.warning("PAC evaluation failed for %s: %s", host, exc)
-            return None
+            return None, False
 
     def _load_pac(self, pac_url):
-        """Télécharge et compile un fichier PAC (avec cache)."""
-        if pac_url in self._pac_cache:
-            return self._pac_cache[pac_url]
+        """
+        Télécharge et compile un fichier PAC (avec cache).
 
-        pac = None
+        Un échec (réseau, certificat, contenu invalide) n'est mémorisé que
+        PAC_RETRY_DELAY secondes : le PAC est ensuite retenté.
+        """
+        cached = self._pac_cache.get(pac_url)
+        if cached is not None:
+            pac, failed_at = cached
+            if pac is not None or time.monotonic() - failed_at < PAC_RETRY_DELAY:
+                return pac
+
         try:
             from pypac.parser import PACFile
         except ImportError:
@@ -369,13 +415,14 @@ class ProxyDetector:
                 self._pac_warning_shown = True
             return None
 
+        pac = None
         text = self.fetch_pac(pac_url, self.verify)
         if text:
             try:
                 pac = PACFile(text)
             except Exception as exc:
                 logger.warning("Invalid PAC file %s: %s", pac_url, exc)
-        self._pac_cache[pac_url] = pac
+        self._pac_cache[pac_url] = (pac, time.monotonic())
         return pac
 
     @staticmethod
@@ -402,13 +449,18 @@ class ProxyDetector:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
             urllib.request.HTTPSHandler(context=build_ssl_context(verify)),
+            _SafeRedirectHandler(),
         )
         try:
             with opener.open(pac_url, timeout=5) as response:
                 status = getattr(response, "status", None)
                 if status not in (None, 200):
                     return None
-                return response.read().decode("utf-8", errors="replace")
+                data = response.read(MAX_PAC_SIZE + 1)
+                if len(data) > MAX_PAC_SIZE:
+                    logger.warning("PAC file %s ignored: larger than %s bytes", pac_url, MAX_PAC_SIZE)
+                    return None
+                return data.decode("utf-8", errors="replace")
         except Exception as exc:
             # urllib enveloppe les erreurs TLS dans URLError.reason
             if isinstance(getattr(exc, "reason", exc), ssl.SSLError):

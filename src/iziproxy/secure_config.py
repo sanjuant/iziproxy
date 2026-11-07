@@ -65,8 +65,9 @@ def _split_auth(url):
     """
     Sépare une URL en (schéma, utilisateur, mot_de_passe, reste).
 
-    Le dernier « @ » de l'autorité sépare les identifiants de l'hôte, ce qui
-    tolère un « @ » non encodé dans le mot de passe.
+    Le dernier « @ » de l'autorité (avant le premier « / », « ? » ou « # »)
+    sépare les identifiants de l'hôte, ce qui tolère un « @ » non encodé
+    dans le mot de passe sans confondre un « @ » du chemin.
 
     Returns:
         tuple: (scheme, username, password, rest) ; username None sans identifiants
@@ -75,7 +76,8 @@ def _split_auth(url):
     if not match:
         return None, None, None, url
     scheme, remainder = match.groups()
-    at = remainder.rfind("@")
+    end = min((i for i in (remainder.find(c) for c in "/?#") if i != -1), default=len(remainder))
+    at = remainder.rfind("@", 0, end)
     if at == -1:
         return scheme, None, None, remainder
     auth, rest = remainder[:at], remainder[at + 1:]

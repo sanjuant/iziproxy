@@ -58,6 +58,43 @@ Deux cas désactivent cette protection, à choisir en connaissance de cause :
   outil configuré une fois pour toutes avec une adresse fixe, passez plutôt
   un jeton fixe : ``start_local_proxy(token="un-jeton-long-et-secret")`` (port 3128 par défaut).
 
+Les autres limites du proxy local : corps de requête ``http://`` de 100 Mio
+au plus (``413`` au-delà ; les tunnels ``CONNECT`` ne sont pas concernés),
+256 connexions simultanées (``503`` au-delà), caractères de contrôle refusés
+dans la ligne de requête et les en-têtes (``400``).
+
+Proxys qui reçoivent vos identifiants
+-------------------------------------
+
+Le mot de passe Basic, ou la réponse NTLM / Negotiate calculée avec votre
+session Windows, ne part que vers un proxy de confiance :
+
+* sans ``auth_proxies`` : les proxys donnés explicitement (``proxy_url``,
+  configuration) ou par le système (registre, variables d'environnement),
+  et ceux d'un PAC obtenu de façon sûre (fichier local, ``file://`` ou
+  ``https://`` avec certificat vérifié) ;
+* avec ``auth_proxies`` : uniquement les hôtes listés, quelle que soit la
+  source (mêmes formats que ``no_proxy`` : ``proxy.corp.com``,
+  ``*.corp.com``, ``10.0.0.0/8``, ``proxy:8080``).
+
+Un PAC téléchargé en ``http://`` (ou découvert via WPAD) peut être modifié
+par n'importe quel équipement du réseau : il désignerait alors un proxy qui
+récupérerait le mot de passe ou une réponse NTLM réutilisable (relais). Ses
+proxys ne reçoivent donc des identifiants que s'ils figurent dans
+``auth_proxies`` ; sinon la requête part sans authentification (``407``) et
+un avertissement donne la marche à suivre :
+
+.. code-block:: python
+
+   IziProxy(pac_url="http://wpad.corp/proxy.pac", auth_proxies=["*.proxy.corp.com"])
+
+Le téléchargement d'un PAC ``https://`` ne suit jamais une redirection vers
+``http://``. Un PAC indisponible est retenté au bout d'une minute.
+
+En CGI (``REQUEST_METHOD`` défini), la variable ``HTTP_PROXY`` est ignorée,
+comme dans urllib : elle peut provenir de l'en-tête ``Proxy:`` envoyé par
+le client (« httpoxy »).
+
 Ce qui reste de votre ressort
 -----------------------------
 
@@ -65,8 +102,8 @@ Le fichier ``iziproxy.yml`` du répertoire courant
    IziProxy lit ``./iziproxy.yml`` (pratique pour un projet). Or ce fichier
    décide où part le trafic : un dépôt cloné malveillant pourrait y désigner
    son propre proxy, qui recevrait votre authentification. IziProxy
-   **avertit** quand ce fichier définit ``proxy_url``, ``pac_url`` ou
-   ``verify``. Pour une configuration personnelle, utilisez
+   **avertit** quand ce fichier définit ``proxy_url``, ``pac_url``,
+   ``auth_proxies`` ou ``verify``. Pour une configuration personnelle, utilisez
    ``~/.config/iziproxy.yml`` ; dans une application, passez
    ``config_path=`` explicitement.
 

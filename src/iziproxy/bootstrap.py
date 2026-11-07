@@ -59,6 +59,9 @@ class Installation:
         self.urllib_patched = False
         self._previous_opener = None
         self._installed = False
+        self._env_applied = False
+        # Proxys locaux déjà démarrés avant install() : uninstall() les laisse tourner
+        self._preexisting_local_proxies = list(proxy._local_proxies)
 
     def __repr__(self):
         return f"<iziproxy.Installation {self.describe()}>"
@@ -113,10 +116,11 @@ class Installation:
             if self.requests_patched:
                 self.proxy.unpatch_requests()
                 self.requests_patched = False
-            if self.environment:
+            if self._env_applied:
                 self.proxy.clear_environment_variables()
                 self.environment = {}
-            self.proxy.stop_local_proxies()
+                self._env_applied = False
+            self.proxy.stop_local_proxies(keep=self._preexisting_local_proxies)
             self.local_proxy_url = None
         logger.info("iziproxy uninstalled")
 
@@ -147,7 +151,7 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
             l'environnement). False : variables vers le proxy d'entreprise,
             identifiants Basic inclus ; impossible avec NTLM.
         **options: Paramètres d'IziProxy (proxy_url, pac_url, username,
-            password, domain, auth_type, no_proxy, config_path, environment,
+            password, domain, auth_type, no_proxy, auth_proxies, config_path, environment,
             interactive, debug)
 
     Returns:
@@ -179,9 +183,10 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
 
         try:
             if env_vars:
-                if not local_proxy and proxy._uses_ntlm():
+                if not local_proxy and proxy._route()[1] == "ntlm":
                     raise ValueError("Environment variables cannot carry NTLM authentication: "
                                      "use install(local_proxy=True)")
+                installation._env_applied = True
                 installation.environment = proxy.set_environment_variables(local_proxy=local_proxy)
                 if local_proxy:
                     installation.local_proxy_url = installation.environment.get("HTTPS_PROXY")

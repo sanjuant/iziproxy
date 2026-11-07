@@ -25,6 +25,10 @@ fois et seulement lorsqu'une requête doit passer par le proxy. Une réponse
 ``Proxy-Authenticate`` donnent le schéma (NTLM / Negotiate si pyspnego est
 installé, sinon Basic).
 
+Avec un PAC, le proxy sondé est celui de la première URL qui en désigne un :
+un PAC qui répond ``DIRECT`` pour ``www.example.com`` ne fige donc pas la
+décision.
+
 Authentification Basic
 ----------------------
 

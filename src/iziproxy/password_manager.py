@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import sys
+import threading
 from typing import Optional, Tuple
 
 Credentials = Tuple[Optional[str], Optional[str], Optional[str]]
@@ -76,7 +77,10 @@ class PasswordManager:
         dialogs = []
         if platform.system() == "Windows":
             dialogs.append(self._get_credentials_windows_complete)
-        dialogs.append(self._get_credentials_tkinter_dialog)
+        # tkinter n'est fiable que dans le thread principal ; la saisie peut être
+        # demandée depuis un thread du proxy local ou d'un client HTTP
+        if threading.current_thread() is threading.main_thread():
+            dialogs.append(self._get_credentials_tkinter_dialog)
 
         for dialog in dialogs:
             creds = dialog(title, existing_domain, existing_username, auth_type)

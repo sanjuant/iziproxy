@@ -25,6 +25,7 @@ from .proxy_utils import (
     normalize_proxy_url,
     parse_no_proxy,
     probe_proxy_auth,
+    proxy_host_port,
     should_bypass,
     strip_credentials,
 )
@@ -65,7 +66,7 @@ class IziProxy:
 
     def __init__(self, config_path=None, proxy_url=None, pac_url=None, environment=None,
                  username=None, password=None, domain=None, auth_type=None,
-                 no_proxy=None, interactive=None, verify=None, debug=False):
+                 no_proxy=None, interactive=None, verify=None, auth_proxies=None, debug=False):
         """
         Args:
             config_path (str): Fichier de configuration YAML
@@ -85,6 +86,11 @@ class IziProxy:
                 chemin vers un fichier / répertoire d'autorités (None : clé
                 ``verify`` de la configuration). Les certificats des sites
                 restent vérifiés par chaque client (``verify`` de requests...).
+            auth_proxies (str|list): Proxys autorisés à recevoir les
+                identifiants (mêmes motifs que no_proxy : hôte, ``*.corp.com``,
+                CIDR, ``hôte:port``). None : clé ``auth_proxies`` de la
+                configuration, sinon proxys explicites ou du système, et ceux
+                d'un PAC obtenu de façon sûre (https:// vérifié ou fichier local)
             debug (bool): Afficher les journaux détaillés
         """
         if debug:
@@ -102,6 +108,7 @@ class IziProxy:
         self.domain_override = domain
         self.auth_type_override = auth_type.lower() if auth_type else None
         self.no_proxy_override = no_proxy
+        self.auth_proxies_override = auth_proxies
         self.interactive = interactive
 
         self.config_manager = ConfigManager(config_path)
@@ -116,6 +123,9 @@ class IziProxy:
         self._settings = None
         self._auth = None
         self._credentials = None
+        # Incrémenté à chaque oubli des identifiants : les adaptateurs NTLM
+        # créés avant (sessions, proxys locaux) sont alors recréés
+        self._auth_generation = 0
         self._pac_results = {}
         self._saved_env = None
         self._env_local_proxy = None
@@ -244,20 +254,99 @@ class IziProxy:
         parts = urlsplit(url)
         key = (parts.scheme, parts.hostname, parts.port)
         with self._lock:
-            if key not in self._pac_results:
-                self._pac_results[key] = self.proxy_detector.find_proxy_for_url(url, pac_url)
-            return self._pac_results[key]
+            if key in self._pac_results:
+                return self._pac_results[key]
+            proxy, reliable = self.proxy_detector.evaluate_pac(url, pac_url)
+            # Un PAC indisponible donne « direct » sans être mémorisé : il est
+            # retenté plus tard (voir ProxyDetector) au lieu de figer la route
+            if reliable:
+                self._pac_results[key] = proxy
+            return proxy
+
+    def _select_proxy(self, url=None):
+        """URL du proxy (sans identifiants ajoutés) pour une URL, ou None."""
+        target = url or DEFAULT_TARGET_URL
+        proxies = self._raw_proxies(target)
+        scheme = (urlsplit(target).scheme or "https").lower()
+        return proxies.get(scheme) or proxies.get("https") or proxies.get("http")
+
+    # ------------------------------------------------------------------ #
+    # Proxys autorisés à recevoir les identifiants
+    # ------------------------------------------------------------------ #
+    def _auth_proxy_rules(self):
+        """Liste blanche auth_proxies (paramètre, environnement, configuration)."""
+        if self.auth_proxies_override is not None:
+            return parse_no_proxy(self.auth_proxies_override)
+        value = self._env_config().get("auth_proxies")
+        if value is None:
+            value = self.config.get("auth_proxies")
+        return parse_no_proxy(value)
+
+    def _pac_is_trusted(self, pac_url):
+        """Un PAC obtenu par un canal authentifié (fichier local, https:// vérifié)."""
+        if os.path.exists(pac_url):
+            return True
+        scheme = urlsplit(pac_url).scheme.lower()
+        return scheme == "file" or (scheme == "https" and self.verify is not False)
+
+    def _may_authenticate(self, proxy_url):
+        """
+        Indique si les identifiants peuvent être envoyés à ce proxy.
+
+        Avec auth_proxies : seulement aux hôtes listés. Sinon : proxys
+        explicites ou du système, et proxys d'un PAC obtenu de façon sûre.
+        Un PAC en http:// peut être falsifié sur le réseau (ou via WPAD) :
+        il obtiendrait le mot de passe Basic ou une réponse NTLM réutilisable.
+        """
+        host, port = proxy_host_port(proxy_url)
+        if not host:
+            return False
+        rules = self._auth_proxy_rules()
+        if rules:
+            authority = f"[{host}]" if ":" in host else host
+            allowed = should_bypass(f"http://{authority}:{port}/", rules, include_loopback=False)
+        else:
+            settings = self._proxy_settings()
+            allowed = settings["source"] != "pac" or self._pac_is_trusted(settings["pac_url"])
+        if not allowed:
+            self._warn_once(
+                f"untrusted:{host}:{port}",
+                "Credentials withheld from proxy %s:%s: %s. Add its host to auth_proxies to allow it.",
+                host, port,
+                "it is not listed in auth_proxies" if rules
+                else "it comes from a PAC file downloaded without TLS")
+        return allowed
+
+    def _route(self, url=None):
+        """
+        Route d'une URL et façon de s'authentifier auprès de son proxy.
+
+        Returns:
+            tuple: (proxy|None, mode) ; mode : 'direct', 'none' (proxy sans
+            identifiants), 'basic' ou 'ntlm'
+        """
+        proxy = self._select_proxy(url)
+        if not proxy:
+            return None, "direct"
+        if not self._auth_settings(url)["required"] or not self._may_authenticate(proxy):
+            return proxy, "none"
+        if self._uses_ntlm(url):
+            return proxy, "ntlm"
+        return proxy, "basic"
 
     # ------------------------------------------------------------------ #
     # Authentification
     # ------------------------------------------------------------------ #
-    def _auth_settings(self):
+    def _auth_settings(self, url=None):
         """
         Détermine (une seule fois) si une authentification est nécessaire et
         laquelle.
 
         Ordre : paramètres du constructeur, configuration de l'environnement,
         puis sondage du proxy (réponse 407 et en-têtes Proxy-Authenticate).
+        Le proxy sondé est celui de ``url`` (https://www.example.com par
+        défaut) ; tant qu'aucune URL n'a désigné de proxy (PAC qui répond
+        DIRECT pour la cible par défaut), la décision n'est pas mémorisée.
 
         Returns:
             dict: {'required': bool, 'type': 'basic'|'ntlm'}
@@ -273,14 +362,19 @@ class IziProxy:
             if required is None and (self.username_override or self.password_override):
                 required = True
 
-            proxies = self._raw_proxies()
-            proxy = proxies.get("https") or proxies.get("http")
+            proxy = self._select_proxy(url)
+            if not proxy:
+                source = self._proxy_settings()["source"]
+                result = {"required": bool(required) and source != "direct", "type": auth_type or "basic"}
+                if source == "direct":
+                    self._auth = result
+                return result
 
-            if proxy and has_credentials(proxy):
+            if has_credentials(proxy):
                 # Identifiants déjà présents dans l'URL du proxy
                 required = True if required is None else required
                 auth_type = auth_type or "basic"
-            elif proxy and (required is None or (required and auth_type is None)):
+            elif required is None or (required and auth_type is None):
                 status, schemes = probe_proxy_auth(
                     proxy, ssl_context=self._proxy_ssl_context() if is_https_proxy(proxy) else None)
                 logger.debug("Proxy probe %s -> status=%s schemes=%s",
@@ -290,8 +384,7 @@ class IziProxy:
                 if required and auth_type is None:
                     auth_type = self._pick_auth_type(schemes)
 
-            # Sans proxy, aucune authentification n'a de sens
-            self._auth = {"required": bool(required) and bool(proxy), "type": auth_type or "basic"}
+            self._auth = {"required": bool(required), "type": auth_type or "basic"}
             logger.debug("Authentication settings: %s", self._auth)
             return self._auth
 
@@ -303,9 +396,9 @@ class IziProxy:
             return "ntlm"
         return "basic"
 
-    def _uses_ntlm(self):
-        """Indique si l'adaptateur NTLM doit être utilisé."""
-        auth = self._auth_settings()
+    def _uses_ntlm(self, url=None):
+        """Indique si l'authentification exigée est NTLM / Negotiate (et utilisable)."""
+        auth = self._auth_settings(url)
         if not (auth["required"] and auth["type"] == "ntlm"):
             return False
         if not NTLM_SUPPORT:
@@ -325,8 +418,10 @@ class IziProxy:
             if self._credentials is not None:
                 return self._credentials
 
-            proxies = self._raw_proxies()
-            proxy = proxies.get("https") or proxies.get("http")
+            # Seule une URL configurée (explicite, système) peut porter des
+            # identifiants : les proxys désignés par un PAC n'en ont jamais
+            settings = self._proxy_settings()
+            proxy = settings.get("https") or settings.get("http")
             auth_type = self._auth_settings()["type"]
 
             if self.username_override or self.password_override:
@@ -374,8 +469,8 @@ class IziProxy:
         proxies = self._raw_proxies(url)
         if not proxies:
             return {}
-        auth = self._auth_settings()
-        if not auth["required"] or self._uses_ntlm():
+        _, mode = self._route(url)
+        if mode != "basic":
             return proxies
 
         username, password, _ = self._get_credentials()
@@ -384,7 +479,8 @@ class IziProxy:
             return proxies
         secret = password.get_password() if password else None
         return {
-            scheme: value if has_credentials(value) else inject_credentials(value, username, secret)
+            scheme: value if has_credentials(value) or not self._may_authenticate(value)
+            else inject_credentials(value, username, secret)
             for scheme, value in proxies.items()
         }
 
@@ -434,14 +530,14 @@ class IziProxy:
         Args:
             url (str): URL cible (prise en compte des exclusions et du PAC)
 
+        requests ignore les exclusions pour des proxys passés explicitement :
+        passez l'URL cible (le dictionnaire est alors vide pour un hôte exclu)
+        ou utilisez create_session().
+
         Returns:
-            dict: {'http': ..., 'https': ..., 'no_proxy': ...} ou {}
+            dict: {'http': ..., 'https': ...} ou {}
         """
-        proxies = self._resolve(url)
-        no_proxy = self._proxy_settings()["no_proxy"]
-        if proxies and no_proxy:
-            proxies = dict(proxies, no_proxy=",".join(no_proxy))
-        return proxies
+        return self._resolve(url)
 
     def get_proxy_config(self, url=None):
         """
@@ -536,7 +632,7 @@ class IziProxy:
         Returns:
             LocalProxy: Proxy démarré (url, address, port, stop(), gestionnaire de contexte)
         """
-        if self._raw_proxies() and self._auth_settings()["required"]:
+        if self._proxy_settings()["source"] != "direct" and self._auth_settings()["required"]:
             self._get_credentials()
         local = LocalProxy(self, port=port, timeout=timeout, token=token).start()
         with self._lock:
@@ -544,12 +640,21 @@ class IziProxy:
             self._local_proxies.append(local)
         return local
 
-    def stop_local_proxies(self):
-        """Arrête tous les proxys locaux démarrés par cette instance."""
+    def stop_local_proxies(self, keep=()):
+        """
+        Arrête les proxys locaux démarrés par cette instance.
+
+        Args:
+            keep (iterable): Proxys locaux à laisser tourner
+        """
+        keep = list(keep)
         with self._lock:
-            proxies, self._local_proxies = self._local_proxies, []
-            self._env_local_proxy = None
-            self._shared_local_proxies = {}
+            proxies = [p for p in self._local_proxies if not any(p is k for k in keep)]
+            self._local_proxies = [p for p in self._local_proxies if any(p is k for k in keep)]
+            if not any(self._env_local_proxy is k for k in keep):
+                self._env_local_proxy = None
+            self._shared_local_proxies = {
+                key: p for key, p in self._shared_local_proxies.items() if any(p is k for k in keep)}
         for local in proxies:
             local.stop()
 
@@ -605,9 +710,10 @@ class IziProxy:
         scheme, sep, rest = url.partition("://")
         scheme = {"ws": "http", "wss": "https"}.get(scheme.lower(), scheme.lower())
         target = f"{scheme}{sep}{rest}"
-        if not self._raw_proxies(target):
+        proxy, mode = self._route(target)
+        if proxy is None:
             return None
-        if self._uses_ntlm():
+        if mode == "ntlm":
             return self.local_proxy_url()
         resolved = self._resolve(target)
         return resolved.get(scheme) or resolved.get("https") or resolved.get("http")
@@ -697,7 +803,8 @@ class IziProxy:
         """
         Connexion http.client prête à l'emploi pour l'hôte d'une URL.
 
-        Via un proxy, la connexion ouvre un tunnel CONNECT : les requêtes
+        Via un proxy, la connexion ouvre un tunnel CONNECT (cible https://) ou
+        envoie des requêtes en forme absolue (cible http://) : les requêtes
         s'écrivent comme en direct (chemin relatif).
 
         Args:
@@ -786,7 +893,14 @@ class IziProxy:
         if self._saved_env is None:
             self._saved_env = {name: os.environ.get(name) for name in _PROXY_ENV_VARS}
             self.proxy_detector.env_overrides = dict(self._saved_env)
-        os.environ.update(values)
+        # Une variable absente de values reprend sa valeur d'origine : sinon un
+        # appel précédent la laisserait pointer vers un proxy local arrêté
+        for name in _PROXY_ENV_VARS:
+            value = values.get(name, self._saved_env[name])
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         logger.debug("Proxy environment variables set: %s", sorted(values))
         return values
 
@@ -804,7 +918,7 @@ class IziProxy:
 
     def _direct_env(self):
         """Variables pointant directement vers le proxy d'entreprise."""
-        if self._uses_ntlm():
+        if self._route()[1] == "ntlm":
             self._warn_once("ntlm-env", "Environment variables cannot carry NTLM authentication; "
                                         "use set_environment_variables(local_proxy=True)")
         if self._proxy_settings()["source"] == "pac":
@@ -896,6 +1010,7 @@ class IziProxy:
         with self._lock:
             self._auth = None
             self._credentials = None
+            self._auth_generation += 1
 
     def reset_credentials(self):
         """

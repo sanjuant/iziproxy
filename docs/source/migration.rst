@@ -46,6 +46,20 @@ La version 0.7 réécrit le cœur de la bibliothèque. Changements visibles :
   s'authentifie à la place des outils externes ; il exige un jeton inclus
   dans son URL (voir :doc:`security`).
 * ``verify="/chemin"`` lève ``ValueError`` si le fichier n'existe pas.
+* Les proxys désignés par un PAC en ``http://`` ne reçoivent plus
+  d'identifiants, sauf s'ils figurent dans la nouvelle option
+  ``auth_proxies`` (voir :doc:`security`).
+* ``get_proxy_dict()`` ne renvoie plus de clé ``no_proxy`` (requests
+  l'ignore pour des proxys explicites) : passez l'URL cible.
+* ``http_connection()`` vers une cible ``http://`` envoie des requêtes en
+  forme absolue au lieu d'un tunnel ``CONNECT`` (refusé vers le port 80 par
+  la plupart des proxys).
+* Détection de l'environnement : les mots par défaut (``dev``, ``test``,
+  ``prod``...) ne reconnaissent plus qu'un segment entier du nom d'hôte
+  (``dev01-web`` oui, ``devices`` non) ; les motifs de la configuration
+  restent des sous-chaînes et passent en premier.
+* Les fichiers ``.env`` sont tous lus : chaque variable vient du premier
+  fichier qui la définit.
 
 Depuis CNTLM ou px
 ------------------

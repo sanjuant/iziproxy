@@ -14,6 +14,27 @@ logger = logging.getLogger("iziproxy")
 # Hôtes toujours joignables sans proxy (boucle locale)
 LOOPBACK_BYPASS = ("localhost", "127.0.0.0/8", "::1")
 
+# Ports par défaut des schémas d'URL cibles
+DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def _netloc_bounds(url):
+    """
+    Retourne (schéma, autorité, reste) d'une URL, ou None sans « :// ».
+
+    L'autorité s'arrête au premier « / », « ? » ou « # » : un « @ » dans le
+    chemin n'est donc jamais pris pour un séparateur d'identifiants.
+    """
+    scheme, sep, rest = (url or "").partition("://")
+    if not sep:
+        return None
+    end = len(rest)
+    for char in "/?#":
+        index = rest.find(char)
+        if index != -1:
+            end = min(end, index)
+    return scheme, rest[:end], rest[end:]
+
 
 def parse_no_proxy(value):
     """
@@ -73,7 +94,9 @@ def _match_entry(entry, host, port):
     entry = entry.rstrip("/")
 
     entry_host, entry_port = _split_host_port(entry)
-    if entry_port and port and entry_port != str(port):
+    # port est toujours renseigné (port par défaut du schéma) : « hote:8080 »
+    # ne couvre donc pas http://hote/
+    if entry_port and entry_port != str(port):
         return False
 
     # Réseau CIDR ou adresse IP
@@ -115,7 +138,7 @@ def should_bypass(url, no_proxy, include_loopback=True):
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
-        port = parts.port
+        port = parts.port or DEFAULT_PORTS.get(parts.scheme.lower())
     except ValueError:
         return False
     if not host:
@@ -175,20 +198,17 @@ def normalize_proxy_url(value, default_scheme="http"):
 
 def strip_credentials(proxy_url):
     """Retire les identifiants d'une URL de proxy."""
-    if not proxy_url or "@" not in proxy_url:
+    bounds = _netloc_bounds(proxy_url)
+    if bounds is None or "@" not in bounds[1]:
         return proxy_url
-    scheme, sep, rest = proxy_url.partition("://")
-    if not sep:
-        return proxy_url
-    return f"{scheme}://{rest.rsplit('@', 1)[1]}"
+    scheme, netloc, rest = bounds
+    return f"{scheme}://{netloc.rsplit('@', 1)[1]}{rest}"
 
 
 def has_credentials(proxy_url):
     """Indique si une URL de proxy contient déjà des identifiants."""
-    if not proxy_url or "://" not in proxy_url:
-        return False
-    netloc = proxy_url.split("://", 1)[1].split("/", 1)[0]
-    return "@" in netloc
+    bounds = _netloc_bounds(proxy_url)
+    return bounds is not None and "@" in bounds[1]
 
 
 def inject_credentials(proxy_url, username, password):
@@ -225,7 +245,7 @@ def extract_credentials(proxy_url):
     """
     if not has_credentials(proxy_url):
         return None, None
-    auth = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
+    auth = _netloc_bounds(proxy_url)[1].rsplit("@", 1)[0]
     username, _, password = auth.partition(":")
     return unquote(username) or None, unquote(password) or None
 

@@ -29,6 +29,7 @@ import base64
 import binascii
 import hmac
 import http.client
+import ipaddress
 import logging
 import re
 import secrets
@@ -46,7 +47,6 @@ LISTEN_HOST = "127.0.0.1"
 # Port par défaut de IziProxy.start_local_proxy() : celui de cntlm et squid,
 # déjà connu de la plupart des outils configurés pour un proxy local
 DEFAULT_PORT = 3128
-_LOOPBACK_NAMES = (LISTEN_HOST, "localhost", "::1")
 
 # Nom d'utilisateur placé devant le jeton dans l'URL du proxy local
 TOKEN_USERNAME = "iziproxy"
@@ -64,6 +64,14 @@ _REQUEST_SKIP = _HOP_BY_HOP | {"content-length", "expect"}
 _MAX_LINE = 65536
 _MAX_HEADERS = 200
 _BUFFER = 65536
+# Corps d'une requête http:// (les tunnels CONNECT ne sont pas concernés),
+# lu en mémoire pour pouvoir être rejoué pendant la négociation NTLM
+MAX_BODY = 100 * 1024 * 1024
+# Connexions clientes simultanées (un thread chacune)
+MAX_CONNECTIONS = 256
+# Caractères de contrôle interdits dans la ligne de requête et les en-têtes :
+# un « \r » isolé serait pris pour une fin de ligne par certains proxys amont
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 
 class _BadRequest(Exception):
@@ -76,6 +84,22 @@ class _LoopDetected(Exception):
 
 class _UnsupportedRoute(Exception):
     """La route choisie passe par un proxy que le proxy local ne sait pas joindre."""
+
+
+class _BodyTooLarge(Exception):
+    """Corps de requête supérieur à MAX_BODY (réponse 413)."""
+
+
+def _is_local_address(host):
+    """Boucle locale ou adresse « toutes interfaces » (127.0.0.0/8, ::1, 0.0.0.0, localhost)."""
+    host = (host or "").strip("[]").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
 
 
 # ---------------------------------------------------------------------- #
@@ -98,6 +122,8 @@ def _read_headers(rfile):
         line = line.decode("latin-1").rstrip("\r\n")
         if not line:
             return headers
+        if _CONTROL_RE.search(line):
+            raise _BadRequest("Control character in header")
         if line[0] in " \t" and headers:
             # Ligne de continuation (obsolète mais tolérée)
             name, value = headers[-1]
@@ -114,12 +140,16 @@ def _read_headers(rfile):
 def _read_chunked(rfile):
     """Décode un corps « chunked » (les trailers sont ignorés)."""
     chunks = []
+    total = 0
     while True:
         size_line = _read_line(rfile).split(b";", 1)[0].strip()
-        try:
-            size = int(size_line, 16)
-        except ValueError as exc:
-            raise _BadRequest("Invalid chunk size") from exc
+        # int(…, 16) accepterait « -1 », « +5 » ou « 0x10 »
+        if not size_line or size_line.strip(b"0123456789abcdefABCDEF"):
+            raise _BadRequest("Invalid chunk size")
+        size = int(size_line, 16)
+        total += size
+        if total > MAX_BODY:
+            raise _BodyTooLarge()
         if size == 0:
             # Trailers éventuels, terminés par une ligne vide
             while _read_line(rfile).strip():
@@ -155,6 +185,8 @@ def _read_body(rfile, headers):
         # int() accepterait « -1 » ou « +5 » : rfile.read(-1) lirait jusqu'à la fermeture
         if not length.strip().isdigit():
             raise _BadRequest("Invalid Content-Length")
+        if int(length) > MAX_BODY:
+            raise _BodyTooLarge()
         return _read_exact(rfile, int(length))
     return b""
 
@@ -254,8 +286,11 @@ class _Handler(socketserver.StreamRequestHandler):
             line = _read_line(self.rfile)
             if not line.strip():
                 return
+            line = line.decode("latin-1").rstrip("\r\n")
+            if _CONTROL_RE.search(line):
+                raise _BadRequest("Control character in the request line")
             try:
-                method, target, _version = line.decode("latin-1").strip().split(" ", 2)
+                method, target, _version = line.strip().split(" ", 2)
             except ValueError as exc:
                 raise _BadRequest("Invalid request line") from exc
             method = method.upper()
@@ -273,6 +308,8 @@ class _Handler(socketserver.StreamRequestHandler):
                 self._handle_http(proxy, method, target, headers)
         except _BadRequest as exc:
             self._reply(400, "Bad Request", str(exc))
+        except _BodyTooLarge:
+            self._reply(413, "Content Too Large", f"Request bodies are limited to {MAX_BODY} bytes")
         except _LoopDetected as exc:
             self._reply(508, "Loop Detected", str(exc))
         except _UnsupportedRoute as exc:
@@ -320,6 +357,13 @@ class _Handler(socketserver.StreamRequestHandler):
         parts = urlsplit(target)
         if parts.scheme.lower() != "http" or not parts.hostname:
             raise _BadRequest("Only absolute http:// URLs and CONNECT are supported")
+        length = (_header(headers, "Content-Length") or "").strip()
+        if length.isdigit() and int(length) > MAX_BODY:
+            raise _BodyTooLarge()
+        if "100-continue" in (_header(headers, "Expect") or "").lower():
+            # Le client attend ce feu vert avant d'envoyer le corps (curl : 1 s sinon)
+            self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+            self.wfile.flush()
         body = _read_body(self.rfile, headers)
         sock, response = proxy._forward_http(method, target, parts, headers, body)
         try:
@@ -333,6 +377,32 @@ class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = False
     block_on_close = False
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # Au-delà de MAX_CONNECTIONS, refus immédiat plutôt qu'un thread de plus
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
+                                b"Connection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 class LocalProxy:
@@ -372,6 +442,7 @@ class LocalProxy:
         self.izi = izi
         self.timeout = timeout
         self._ntlm_adapter = None
+        self._ntlm_generation = None
         self._lock = threading.Lock()
         try:
             self._server = _Server((LISTEN_HOST, port), _Handler)
@@ -483,9 +554,7 @@ class LocalProxy:
 
         mode : 'direct', 'ntlm' ou 'basic' (Basic sans identifiants = aucun en-tête)
         """
-        proxies = self.izi._raw_proxies(url)
-        scheme = urlsplit(url).scheme
-        proxy = proxies.get(scheme) or proxies.get("https") or proxies.get("http")
+        proxy, mode = self.izi._route(url)
         if not proxy:
             return None, "direct"
         scheme = urlsplit(proxy).scheme.lower()
@@ -493,16 +562,19 @@ class LocalProxy:
             raise _UnsupportedRoute(f"The local proxy cannot relay through a {scheme}:// proxy "
                                     f"(chosen for {url})")
         host, port = proxy_host_port(proxy)
-        if port == self.port and host in _LOOPBACK_NAMES:
+        if port == self.port and _is_local_address(host):
             raise _LoopDetected(f"The proxy chosen for {url} is this local proxy ({self.address})")
-        if self.izi._uses_ntlm():
-            return proxy, "ntlm"
-        return proxy, "basic"
+        return proxy, "ntlm" if mode == "ntlm" else "basic"
 
     def _ntlm(self):
+        """Adaptateur NTLM partagé, recréé si les identifiants ont été oubliés."""
         with self._lock:
-            if self._ntlm_adapter is None:
+            generation = self.izi._auth_generation
+            if self._ntlm_adapter is None or self._ntlm_generation != generation:
+                if self._ntlm_adapter is not None:
+                    self._ntlm_adapter.close()
                 self._ntlm_adapter = self.izi._create_ntlm_adapter()
+                self._ntlm_generation = generation
             return self._ntlm_adapter
 
     def _basic_header(self, url, proxy):

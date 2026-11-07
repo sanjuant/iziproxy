@@ -20,6 +20,16 @@ ENV_ALIASES = {
     "prod": "prod", "production": "prod", "prd": "prod", "live": "prod",
 }
 
+# Mots reconnus par défaut comme segment entier du nom d'hôte
+DEFAULT_HOSTNAME_WORDS = {
+    "local": ["local", "localhost", "laptop", "desktop", "dev-pc"],
+    "dev": ["dev", "staging", "test", "preprod"],
+    "prod": ["prod", "production"],
+}
+DEFAULT_HOSTNAME_REGEX = {
+    "local": ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"],
+}
+
 
 def normalize_environment(value):
     """
@@ -125,23 +135,36 @@ class EnvironmentDetector:
         return env
 
     def _detect_by_hostname(self):
-        """Compare le nom d'hôte aux motifs (sous-chaînes) puis aux regex."""
+        """
+        Compare le nom d'hôte aux règles, dans l'ordre : motifs de la
+        configuration (sous-chaînes), regex de la configuration, mots par
+        défaut, regex par défaut.
+
+        Les mots par défaut ne valent que comme segment entier du nom
+        (séparé par « - », « . » ou « _ », chiffres finaux tolérés) :
+        « test » ne reconnaît pas « contest-prod », ni « dev » « devices ».
+        """
         hostname = self.system_info["hostname"]
 
-        for env_type, patterns in self._get_hostname_patterns().items():
+        for env_type, patterns in self._configured("hostname_patterns").items():
             for pattern in patterns:
                 if pattern and str(pattern).lower() in hostname:
                     logger.debug("Environment detected from hostname pattern %r", pattern)
                     return env_type
 
-        for env_type, expressions in self._get_hostname_regex().items():
-            for expression in expressions:
-                try:
-                    if re.search(expression, hostname, re.IGNORECASE):
-                        logger.debug("Environment detected from hostname regex %r", expression)
-                        return env_type
-                except re.error:
-                    logger.warning("Invalid hostname regex: %s", expression)
+        rules = [self._configured("hostname_regex")]
+        rules.append({env: [rf"(?:^|[-._]){re.escape(word)}\d*(?=$|[-._])" for word in words]
+                      for env, words in DEFAULT_HOSTNAME_WORDS.items()})
+        rules.append(DEFAULT_HOSTNAME_REGEX)
+        for rule_set in rules:
+            for env_type, expressions in rule_set.items():
+                for expression in expressions:
+                    try:
+                        if re.search(expression, hostname, re.IGNORECASE):
+                            logger.debug("Environment detected from hostname regex %r", expression)
+                            return env_type
+                    except re.error:
+                        logger.warning("Invalid hostname regex: %s", expression)
         return None
 
     def _detect_by_ip(self):
@@ -168,29 +191,10 @@ class EnvironmentDetector:
             return None
         return {"1": "local", "2": "dev", "3": "prod"}.get(choice) or normalize_environment(choice)
 
-    def _merged(self, key, defaults):
-        """Motifs par défaut complétés par ceux de la configuration."""
-        merged = {env: list(values) for env, values in defaults.items()}
+    def _configured(self, key):
+        """Règles de la configuration ({env: [valeurs]}) pour les types connus."""
         configured = self._detection_config.get(key) or {}
-        for env_type in self.ENV_TYPES:
-            for value in configured.get(env_type) or []:
-                if value not in merged[env_type]:
-                    merged[env_type].append(value)
-        return merged
-
-    def _get_hostname_patterns(self):
-        return self._merged("hostname_patterns", {
-            "local": ["local", "laptop", "desktop", "dev-pc"],
-            "dev": ["dev", "staging", "test", "preprod"],
-            "prod": ["prod", "production"],
-        })
-
-    def _get_hostname_regex(self):
-        return self._merged("hostname_regex", {
-            "local": ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"],
-            "dev": ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"],
-            "prod": ["^prod\\d*-", "^production\\d*-"],
-        })
+        return {env: list(configured.get(env) or []) for env in self.ENV_TYPES if configured.get(env)}
 
     def _get_ip_ranges(self):
         return self._detection_config.get("ip_ranges") or {}

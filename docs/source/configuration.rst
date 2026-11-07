@@ -22,6 +22,8 @@ Paramètre          Rôle
 ``interactive``    ``False`` pour ne jamais demander d'identifiants
 ``verify``         Certificats du proxy https:// et du PAC : ``True``, ``False``
                    ou chemin d'autorités (voir plus bas)
+``auth_proxies``   Proxys autorisés à recevoir les identifiants (voir
+                   :doc:`security`) ; mêmes formats que ``no_proxy``
 ``debug``          Journaux détaillés sur stderr
 =================  ==============================================================
 
@@ -42,6 +44,8 @@ Clés par environnement :
 * ``requires_auth`` : ``true``, ``false`` ou absent (détection par sondage)
 * ``auth_type`` : ``basic`` ou ``ntlm`` (absent : choisi d'après ``Proxy-Authenticate``)
 * ``no_proxy`` : exclusions propres à l'environnement
+* ``auth_proxies`` : proxys autorisés à recevoir les identifiants (aussi
+  accepté à la racine du fichier, pour tous les environnements)
 
 Exclusions
 ----------
@@ -51,7 +55,8 @@ Formats acceptés (séparés par virgules, points-virgules ou espaces) :
 * ``example.com`` ou ``.example.com`` : le domaine et ses sous-domaines
 * ``*.example.com``, ``10.*``, ``intra*`` : jokers
 * ``10.0.0.0/8`` : réseau CIDR
-* ``host:8080`` : hôte et port
+* ``host:8080`` : hôte et port (``http://host/`` utilise le port 80 et n'est
+  donc pas couvert)
 * ``<local>`` : noms sans point (format Windows)
 * ``*`` : tout
 

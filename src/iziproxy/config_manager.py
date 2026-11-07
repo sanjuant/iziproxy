@@ -176,7 +176,7 @@ class ConfigManager:
         sources = [loaded] + [env for env in (loaded.get("environments") or {}).values()
                               if isinstance(env, dict)]
         for source in sources:
-            found.update(key for key in ("proxy_url", "pac_url") if source.get(key))
+            found.update(key for key in ("proxy_url", "pac_url", "auth_proxies") if source.get(key))
         return found
 
     def _deep_merge(self, target, source):
@@ -211,16 +211,19 @@ class ConfigManager:
     # ------------------------------------------------------------------ #
     def _load_dotenv(self):
         """
-        Lit le premier fichier .env trouvé.
+        Lit les fichiers .env dans l'ordre de DOTENV_PATHS.
+
+        Chaque variable est prise dans le premier fichier qui la définit : le
+        .env d'un projet sans variables IZIPROXY_* ne masque donc pas ~/.env.
 
         Returns:
             dict: Variables lues
         """
+        values = {}
         for path in self.DOTENV_PATHS:
             expanded = os.path.expanduser(path)
             if not os.path.isfile(expanded):
                 continue
-            values = {}
             try:
                 with open(expanded, "r", encoding="utf-8") as file:
                     for line in file:
@@ -233,13 +236,12 @@ class ConfigManager:
                         value = value.strip()
                         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                             value = value[1:-1]
-                        values[key.strip()] = value
-            except OSError as exc:
+                        values.setdefault(key.strip(), value)
+            except (OSError, UnicodeDecodeError) as exc:
                 logger.debug("Cannot read %s: %s", expanded, exc)
                 continue
             logger.debug("Variables loaded from %s", expanded)
-            return values
-        return {}
+        return values
 
     def _get_credentials_from_env_vars(self, username, password, domain):
         """

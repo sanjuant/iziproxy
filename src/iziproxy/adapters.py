@@ -37,13 +37,21 @@ class IziProxyAdapter(HTTPAdapter):
         super().__init__(**kwargs)
         self.izi = izi
         self._ntlm_adapter = None
+        self._ntlm_generation = None
         self._lock = threading.Lock()
 
     def _ntlm(self):
-        """Crée à la demande l'adaptateur NTLM partagé par la session."""
+        """
+        Crée à la demande l'adaptateur NTLM partagé par la session (recréé
+        après clear_auth_cache(), reset_credentials() ou refresh()).
+        """
         with self._lock:
-            if self._ntlm_adapter is None:
+            generation = self.izi._auth_generation
+            if self._ntlm_adapter is None or self._ntlm_generation != generation:
+                if self._ntlm_adapter is not None:
+                    self._ntlm_adapter.close()
                 self._ntlm_adapter = self.izi._create_ntlm_adapter(**self._adapter_kwargs)
+                self._ntlm_generation = generation
             return self._ntlm_adapter
 
     def proxy_headers(self, proxy):
@@ -67,11 +75,11 @@ class IziProxyAdapter(HTTPAdapter):
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         """Envoie la requête avec le proxy déterminé pour son URL."""
-        raw = self.izi._raw_proxies(request.url)
-        if raw and self.izi._uses_ntlm():
+        proxy, mode = self.izi._route(request.url)
+        if mode == "ntlm":
             return self._ntlm().send(request, stream=stream, timeout=timeout,
                                      verify=verify, cert=cert)
-        resolved = self.izi._resolve(request.url) if raw else {}
+        resolved = self.izi._resolve(request.url) if proxy else {}
         return super().send(request, stream=stream, timeout=timeout,
                             verify=verify, cert=cert, proxies=resolved)
 

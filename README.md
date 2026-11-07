@@ -87,6 +87,7 @@ Ajoutez seulement ce qui manque :
 | Aucune saisie possible (service, CI) | `install(interactive=False)` |
 | Des hôtes doivent rester en direct | `install(no_proxy=["*.corp.local", "10.0.0.0/8"])` |
 | Le type d'authentification est mal détecté | `install(auth_type="ntlm")` ou `"basic"` |
+| « Credentials withheld » : PAC en `http://` et proxy authentifié | `install(auth_proxies=["*.proxy.corp.com"])` (voir [Sécurité](docs/source/security.rst)) |
 | Réglages différents en local / dev / prod | fichier `iziproxy.yml` ([Configuration](#configuration)) |
 | Certificat du proxy `https://` ou du PAC refusé | `pip install "iziproxy[truststore]"`, sinon `install(verify="/chemin/ca-entreprise.pem")` |
 | Ne configurer que certains clients | `install(urllib=False, env_vars=False)` |
