@@ -10,7 +10,7 @@ Merci de votre intérêt pour IziProxy ! Voici comment vous pouvez contribuer au
    cd iziproxy
    ```
 
-2. Créez et activez un environnement virtuel :
+2. Créez et activez un environnement virtuel (Python 3.11 ou plus récent) :
    ```bash
    python -m venv venv
    source venv/bin/activate  # Sur Windows : venv\Scripts\activate
@@ -27,6 +27,16 @@ Exécutez les tests avec pytest :
 
 ```bash
 pytest
+```
+
+Les versions minimales déclarées dans `pyproject.toml` (plus anciennes
+versions sans faille connue) se vérifient dans un environnement installé
+« au plus bas », avec Python 3.11 :
+
+```bash
+uv venv --python 3.11 .venv-min
+uv pip install --python .venv-min --resolution lowest-direct -e ".[dev]"
+.venv-min/Scripts/python -m pytest   # Linux, macOS : .venv-min/bin/python
 ```
 
 Pour vérifier la couverture de code :

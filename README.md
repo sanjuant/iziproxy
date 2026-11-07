@@ -39,7 +39,7 @@ pip install "iziproxy[truststore]" # + certificats vérifiés par le système
 pip install "iziproxy[all]"       # les trois
 ```
 
-Python 3.10 ou plus récent. `[httpx]` et `[aiohttp]` installent ces clients
+Python 3.11 ou plus récent. `[httpx]` et `[aiohttp]` installent ces clients
 pour leurs adaptateurs dédiés.
 
 ## Démarrage

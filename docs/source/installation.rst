@@ -1,7 +1,7 @@
 Installation
 ============
 
-IziProxy nécessite Python 3.10 ou plus récent.
+IziProxy nécessite Python 3.11 ou plus récent.
 
 .. code-block:: bash
 

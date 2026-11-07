@@ -9,7 +9,7 @@ version: 2
 build:
   os: ubuntu-24.04
   tools:
-    # IziProxy needs Python 3.10+; Sphinx 9.2 needs Python 3.13+
+    # IziProxy needs Python 3.11+; Sphinx 9.2 needs Python 3.13+
     python: "3.13"
 
 # Build documentation in the docs/ directory with Sphinx

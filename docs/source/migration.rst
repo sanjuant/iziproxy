@@ -10,9 +10,10 @@ La version 0.7 réécrit le cœur de la bibliothèque. Changements visibles :
   (``pip install iziproxy[ntlm]``) ; sous Windows la session courante est
   utilisée sans mot de passe.
 * Les fichiers PAC nécessitent l'option ``pac`` (``pip install iziproxy[pac]``).
-* Python 3.10 minimum ; requests >= 2.34, urllib3 >= 2.8 (les versions
+* Python 3.11 minimum ; requests >= 2.33, urllib3 >= 2.8 (les versions
   antérieures ont des failles connues, dont des fuites de l'en-tête
-  ``Proxy-Authorization``).
+  ``Proxy-Authorization``) ; options ``ntlm`` : pyspnego >= 0.11.1, ``pac``
+  : pypac >= 0.18.4.
 * ``auth_type`` accepte ``basic``, ``ntlm`` ou ``negotiate`` ; toute autre
   valeur lève ``ValueError`` (elle était traitée en silence comme Basic).
 * ``patch_requests()`` configure toutes les sessions créées ensuite (et plus

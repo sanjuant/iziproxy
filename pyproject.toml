@@ -22,56 +22,56 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 keywords = ["proxy", "enterprise", "authentication", "ntlm", "requests", "configuration", "development",  "pac"]
-# Dernières versions publiées (novembre 2026) : les versions antérieures de
-# requests, urllib3, cryptography et aiohttp ont des failles connues, dont
-# des fuites de l'en-tête Proxy-Authorization
+# Minimums = plus ancienne version sans faille connue (base OSV, novembre
+# 2026) qui fonctionne avec IziProxy, vérifiée par les tests en résolution
+# « au plus bas » : une application peut garder des versions plus anciennes
+# que les dernières. pip installe tout de même les dernières par défaut.
+# Avant ces minimums, requests, urllib3, cryptography et aiohttp ont des
+# failles connues, dont des fuites de l'en-tête Proxy-Authorization.
 dependencies = [
-    "requests>=2.34.2",
-    "PyYAML>=6.0.3",
-    "keyring>=25.7.0",
-    "cryptography>=50.0.2",
+    "requests>=2.33.0",
+    "PyYAML>=6.0.1",
+    "keyring>=23.0.0",
+    "cryptography>=50.0.0",
     "urllib3>=2.8.0",
 ]
-# requests 2.34 et urllib3 2.8 exigent Python 3.10
-requires-python = ">=3.10"
+# Python 3.10 n'est plus maintenu depuis octobre 2026
+requires-python = ">=3.11"
 
 [project.optional-dependencies]
+# pyspnego 0.9.x : pas de wheel pour les Python récents (Negotiate y échoue) ;
+# avant 0.11.1, ARC4 vient d'un module que cryptography va retirer
 ntlm = [
-    "pyspnego>=0.12.4",
+    "pyspnego>=0.11.1",
 ]
+# pypac 0.16 à 0.18.3 acceptent dukpy 0.6 (QuickJS), avec lequel ils
+# n'évaluent plus les PAC ; 0.18.4 exige dukpy < 0.6, 0.19 gère QuickJS
 pac = [
-    "pypac>=0.19.0",
+    "pypac>=0.18.4",
 ]
 truststore = [
-    "truststore>=0.10.5",
+    "truststore>=0.10.0",
 ]
 httpx = [
-    "httpx>=0.28.1",
+    "httpx>=0.26.0",
 ]
 aiohttp = [
-    "aiohttp>=3.14.5",
+    "aiohttp>=3.14.4",
 ]
 all = [
-    "pyspnego>=0.12.4",
-    "pypac>=0.19.0",
-    "truststore>=0.10.5",
+    "iziproxy[ntlm,pac,truststore]",
 ]
-# Outils : minimum = dernière version compatible avec Python 3.10 ; pip
-# installe la toute dernière sur un Python plus récent (websockets 17.4,
-# flake8 7.5 : Python 3.11+ ; Sphinx 9.2 : Python 3.13+)
+# Outils de développement : dernières versions compatibles avec Python 3.11
+# (Sphinx 9.2 exige Python 3.13 : pip l'installe sur un Python récent)
 dev = [
-    "pyspnego>=0.12.4",
-    "pypac>=0.19.0",
-    "truststore>=0.10.5",
-    "httpx>=0.28.1",
-    "aiohttp>=3.14.5",
-    "websockets>=16.1.1",
+    "iziproxy[all,httpx,aiohttp]",
+    "websockets>=17.4",
     "grpcio>=1.85.1",
     "selenium>=4.52.0",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
-    "flake8>=7.4.1",
-    "sphinx>=8.1.3",
+    "flake8>=7.5.0",
+    "sphinx>=9.0.4",
     "sphinx-rtd-theme>=3.1.0",
 ]
 

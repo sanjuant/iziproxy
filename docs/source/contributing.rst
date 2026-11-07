@@ -13,7 +13,7 @@ Installation de l'environnement de développement
    git clone https://github.com/sanjuant/iziproxy.git
    cd iziproxy
 
-2. Créer et activer un environnement virtuel :
+2. Créer et activer un environnement virtuel (Python 3.11 ou plus récent) :
 
 .. code-block:: bash
 
@@ -34,6 +34,16 @@ Exécuter les tests avec pytest :
 .. code-block:: bash
 
    pytest
+
+Les versions minimales déclarées dans ``pyproject.toml`` (plus anciennes
+versions sans faille connue) se vérifient dans un environnement installé
+« au plus bas », avec Python 3.11 :
+
+.. code-block:: bash
+
+   uv venv --python 3.11 .venv-min
+   uv pip install --python .venv-min --resolution lowest-direct -e ".[dev]"
+   .venv-min/Scripts/python -m pytest   # Linux, macOS : .venv-min/bin/python
 
 Pour vérifier la couverture de code :
 
@@ -133,8 +143,9 @@ Structure du projet
    │       ├── local_proxy.py    # Proxy local façon cntlm (jeton, CONNECT, NTLM)
    │       ├── adapters.py       # Adaptateur requests (choix du proxy par requête)
    │       ├── integrations/     # httpx, aiohttp, urllib3, urllib, http.client, gRPC, navigateurs
-   │       ├── ntlm_auth.py      # Adaptateur NTLM / Negotiate (pyspnego)
+   │       ├── ntlm_auth.py      # Adaptateur NTLM / Negotiate (pyspnego), connexions réutilisées
    │       ├── proxy_detector.py # Proxy système et fichiers PAC
+   │       ├── pac_evaluator.py  # Évaluation des PAC dans un processus séparé (délai maximal)
    │       ├── proxy_utils.py    # Exclusions, URLs, sonde d'authentification, TLS
    │       ├── config_manager.py # Configuration YAML et identifiants
    │       ├── password_manager.py # Saisie interactive (Windows, tkinter, console)

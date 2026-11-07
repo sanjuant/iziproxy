@@ -228,13 +228,20 @@ class ProxyHandler(socketserver.StreamRequestHandler):
         # NTLM / Negotiate
         import spnego
 
-        offered = [("Proxy-Authenticate", "Negotiate")] if mode == "negotiate" else \
-            [("Proxy-Authenticate", "NTLM"), ("Proxy-Authenticate", 'Basic realm="test"')]
+        offered = {
+            "negotiate": [("Proxy-Authenticate", "Negotiate")],
+            "both": [("Proxy-Authenticate", "Negotiate"), ("Proxy-Authenticate", "NTLM")],
+        }.get(mode, [("Proxy-Authenticate", "NTLM"), ("Proxy-Authenticate", 'Basic realm="test"')])
         if not header:
             state.pop("ctx", None)
             self._deny(offered, close=self.server.close_on_challenge_request)
             return False
         scheme, _, token = header.partition(" ")
+        if self.server.reject_negotiate and scheme.lower() == "negotiate":
+            # Negotiate limité à Kerberos côté proxy : le client doit passer à NTLM
+            state.pop("ctx", None)
+            self._deny(offered)
+            return False
         if "ctx" not in state:
             state["ctx"] = spnego.server(protocol="ntlm", options=spnego.NegotiateOptions.use_ntlm)
         try:
@@ -337,6 +344,9 @@ class ProxyHandler(socketserver.StreamRequestHandler):
                 self.wfile.flush()
             finally:
                 upstream.close()
+            if self.server.keep_alive:
+                # Connexion cliente gardée (authentification NTLM comprise)
+                continue
             return
 
 
@@ -350,15 +360,19 @@ class ProxyServer:
     Proxy HTTP local.
 
     Args:
-        auth: None, 'basic', 'ntlm' ou 'negotiate'
+        auth: None, 'basic', 'ntlm', 'negotiate' ou 'both' (Negotiate et NTLM)
         tls (bool): Proxy https:// (les clients lui parlent en TLS) ; son
             certificat auto-signé est dans ``cert_path``
         coalesce_connect (bool): Envoyer la réponse à un CONNECT avec les
             premiers octets de la cible (serveur qui parle en premier)
+        reject_negotiate (bool): Refuser les jetons Negotiate (Kerberos seul)
+        keep_alive (bool): Garder la connexion après une requête http://
+            (sinon fermée après chaque réponse)
     """
 
     def __init__(self, auth=None, username="alice", password="S3cret!", domain="CORP",
-                 close_on_challenge_request=False, tls=False, coalesce_connect=False):
+                 close_on_challenge_request=False, tls=False, coalesce_connect=False,
+                 reject_negotiate=False, keep_alive=False):
         self.server = _ThreadingTCPServer(("127.0.0.1", 0), ProxyHandler)
         self.cert_path = None
         if tls:
@@ -374,6 +388,8 @@ class ProxyServer:
         self.server.denied = 0
         self.server.close_on_challenge_request = close_on_challenge_request
         self.server.coalesce_connect = coalesce_connect
+        self.server.reject_negotiate = reject_negotiate
+        self.server.keep_alive = keep_alive
         self.username, self.password, self.domain = username, password, domain
         self.port = self.server.server_address[1]
         self.url = f"{'https' if tls else 'http'}://127.0.0.1:{self.port}"

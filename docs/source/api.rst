@@ -72,6 +72,9 @@ Ces modules ne font pas partie de l'API publique et peuvent évoluer.
 .. automodule:: iziproxy.proxy_detector
    :members:
 
+.. automodule:: iziproxy.pac_evaluator
+   :members: create_evaluator, PacEvaluationError, PacTimeoutError, PAC_EVAL_TIMEOUT
+
 .. automodule:: iziproxy.proxy_utils
    :members:
 

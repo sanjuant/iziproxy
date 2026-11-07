@@ -38,7 +38,6 @@ import socketserver
 import threading
 from urllib.parse import urlsplit
 
-from .ntlm_auth import NtlmProxyAdapter
 from .proxy_utils import (
     basic_proxy_authorization,
     is_https_proxy,
@@ -292,6 +291,9 @@ class _Handler(socketserver.StreamRequestHandler):
                 if not data:
                     break
                 self.wfile.write(data)
+        else:
+            # Réponse sans corps : marque la fin de la lecture (connexion amont réutilisable)
+            response.read()
         self.wfile.flush()
 
     # -------------------------------------------------------------- #
@@ -386,12 +388,13 @@ class _Handler(socketserver.StreamRequestHandler):
             self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
             self.wfile.flush()
         body = _read_body(self.rfile, headers)
-        sock, response = proxy._forward_http(method, target, parts, headers, body)
+        response, finish = proxy._forward_http(method, target, parts, headers, body)
+        relayed = False
         try:
             self._relay_response(response, method)
+            relayed = True
         finally:
-            response.close()
-            sock.close()
+            finish(relayed)
 
 
 class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -686,23 +689,33 @@ class LocalProxy:
         Envoie une requête HTTP vers sa route.
 
         Returns:
-            tuple: (socket, http.client.HTTPResponse dont le corps reste à lire)
+            tuple: (http.client.HTTPResponse dont le corps reste à lire,
+            fin(relayée) qui rend la connexion amont réutilisable ou la ferme)
         """
         absolute = target.split("#", 1)[0]
         proxy, mode = self._route(absolute)
         logger.debug("Local proxy: %s %s via %s", method, absolute, strip_credentials(proxy) or "direct")
 
         if mode == "ntlm":
-            def http_leg(sock, auth_header):
+            adapter = self._ntlm()
+
+            def write_request(sock, auth_header):
                 extra = [("Proxy-Connection", "Keep-Alive"), ("Connection", "Keep-Alive")]
                 if auth_header:
                     extra.append(("Proxy-Authorization", auth_header))
                 sock.sendall(self._serialize(method, absolute, parts, headers, body, extra))
-                return NtlmProxyAdapter._read_response(sock, method)
 
-            sock, response = self._ntlm()._negotiate(proxy, self.timeout, http_leg)
-            sock.settimeout(self.timeout)
-            return sock, response
+            # Connexion déjà authentifiée réutilisée si possible (pas de négociation)
+            connection, response = adapter.http_exchange(proxy, self.timeout, self.timeout,
+                                                         write_request, method)
+
+            def finish(relayed):
+                if relayed:
+                    adapter.release(connection)
+                else:
+                    connection.close()
+
+            return response, finish
 
         if mode == "direct":
             sock = self._connect(parts.hostname, parts.port or 80)
@@ -724,4 +737,10 @@ class LocalProxy:
         except Exception:
             sock.close()
             raise
-        return sock, response
+
+        def finish(relayed):
+            # « Connection: close » : une requête par connexion amont
+            response.close()
+            sock.close()
+
+        return response, finish

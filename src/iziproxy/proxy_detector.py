@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+from .pac_evaluator import PacEvaluationError, PacTimeoutError, create_evaluator
 from .proxy_utils import build_ssl_context, normalize_proxy_url, parse_no_proxy
 
 logger = logging.getLogger("iziproxy")
@@ -390,25 +391,36 @@ class ProxyDetector:
         host = urlsplit(url).hostname or ""
         try:
             return parse_pac_result(pac.find_proxy_for_url(url, host)), True
-        except Exception as exc:
+        except PacTimeoutError as exc:
+            # Boucle infinie probable : le PAC est écarté PAC_RETRY_DELAY secondes
+            self._pac_cache[pac_url] = (None, time.monotonic())
+            logger.warning("PAC file %s did not answer for %s (%s, endless loop?): direct connections, "
+                           "PAC retried in %g s", pac_url, host, exc, PAC_RETRY_DELAY)
+            return None, False
+        except PacEvaluationError as exc:
+            if not pac.alive:
+                self._pac_cache[pac_url] = (None, time.monotonic())
             logger.warning("PAC evaluation failed for %s: %s", host, exc)
             return None, False
 
     def _load_pac(self, pac_url):
         """
-        Télécharge et compile un fichier PAC (avec cache).
+        Télécharge et charge un fichier PAC (avec cache), dans un processus
+        séparé qui borne la durée de chaque évaluation (voir pac_evaluator).
 
-        Un échec (réseau, certificat, contenu invalide) n'est mémorisé que
-        PAC_RETRY_DELAY secondes : le PAC est ensuite retenté.
+        Un échec (réseau, certificat, contenu invalide, délai dépassé) n'est
+        mémorisé que PAC_RETRY_DELAY secondes : le PAC est ensuite retenté.
         """
         cached = self._pac_cache.get(pac_url)
         if cached is not None:
             pac, failed_at = cached
-            if pac is not None or time.monotonic() - failed_at < PAC_RETRY_DELAY:
+            if pac is not None and pac.alive:
                 return pac
+            if pac is None and time.monotonic() - failed_at < PAC_RETRY_DELAY:
+                return None
 
         try:
-            from pypac.parser import PACFile
+            import pypac.parser  # noqa: F401 - seulement vérifier que pypac est installé
         except ImportError:
             if not self._pac_warning_shown:
                 logger.warning("PAC file found but pypac is not installed: pip install iziproxy[pac]")
@@ -419,8 +431,11 @@ class ProxyDetector:
         text = self.fetch_pac(pac_url, self.verify)
         if text:
             try:
-                pac = PACFile(text)
-            except Exception as exc:
+                pac = create_evaluator(text)
+            except PacTimeoutError as exc:
+                logger.warning("PAC file %s ignored: loading it did not finish (%s, endless loop?)",
+                               pac_url, exc)
+            except PacEvaluationError as exc:
                 logger.warning("Invalid PAC file %s: %s", pac_url, exc)
         self._pac_cache[pac_url] = (pac, time.monotonic())
         return pac
@@ -473,6 +488,9 @@ class ProxyDetector:
             return None
 
     def clear_cache(self):
-        """Vide les caches de détection et de PAC."""
+        """Vide les caches de détection et de PAC (et arrête les évaluateurs PAC)."""
         self._settings = None
+        for pac, _ in self._pac_cache.values():
+            if pac is not None:
+                pac.close()
         self._pac_cache.clear()

@@ -15,6 +15,16 @@ Les directives PAC ``PROXY``, ``HTTPS``, ``SOCKS``, ``SOCKS5`` et ``DIRECT``
 sont prises en charge (``SOCKS`` nécessite ``requests[socks]`` et n'est pas
 relayé par le proxy local).
 
+Le PAC est chargé et évalué dans un processus Python séparé, lancé une fois
+par fichier PAC (environ 0,2 s). Le moteur JavaScript de pypac (dukpy) garde
+en effet le verrou global de Python pendant l'évaluation, sans moyen de
+l'interrompre : un PAC qui boucle gèlerait tout le programme. Au-delà de
+10 secondes (``iziproxy.pac_evaluator.PAC_EVAL_TIMEOUT``), le processus est
+arrêté, les connexions sont directes et le PAC est retenté au bout d'une
+minute. Dans une application figée (PyInstaller) ou un Python embarqué dans
+un autre logiciel, le PAC est évalué dans le processus courant, sans ce
+délai maximal.
+
 Détection de l'authentification
 -------------------------------
 
@@ -54,8 +64,24 @@ NTLM authentifie une connexion, pas une requête. L'adaptateur NTLM :
 * confie la lecture de la réponse à http.client / urllib3 : en-têtes,
   cookies, redirections, ``stream=True``, gzip/deflate, ``timeout``.
 
-Le schéma retenu est mémorisé : les requêtes suivantes ne sondent plus le
-proxy. Des identifiants refusés lèvent ``NtlmAuthenticationError``.
+Quand le proxy propose Negotiate et NTLM, Negotiate est essayé d'abord
+(Kerberos quand un ticket est disponible, plus sûr que NTLM), puis NTLM sur
+une nouvelle connexion s'il est refusé. Le schéma qui a réussi est mémorisé :
+les négociations suivantes commencent par lui, sans sonder le proxy. Des
+identifiants refusés lèvent ``NtlmAuthenticationError``.
+
+Les connexions sont réutilisées (keep-alive), si bien que la négociation n'a
+lieu qu'à l'ouverture d'une connexion :
+
+* un tunnel TLS vers un site sert aux requêtes ``https://`` suivantes vers
+  ce site (mêmes réglages ``verify`` / ``cert``) ;
+* une connexion authentifiée au proxy sert aux requêtes ``http://``
+  suivantes et aux ``CONNECT`` (le proxy local en profite aussi) ;
+* une connexion fermée entre-temps par le proxy ou le site est remplacée,
+  et la requête renvoyée une fois ; une réponse ``407`` sur une connexion
+  réutilisée relance la négociation ;
+* au plus ``pool_maxsize`` connexions inactives (10) par proxy et par site ;
+  elles sont fermées avec la session.
 
 Sous Windows, sans mot de passe, pyspnego utilise SSPI avec la session
 courante.
@@ -81,7 +107,8 @@ Proxy local
   ``Proxy-Authorization``...) sont retirés, puis la requête est envoyée en
   forme d'origine (direct) ou absolue (proxy) avec la même négociation NTLM.
   La réponse est relayée avec ``Connection: close`` : une requête par
-  connexion cliente.
+  connexion cliente. Vers un proxy NTLM, la connexion amont authentifiée est
+  ensuite réutilisée pour les requêtes suivantes.
 
 Le type d'authentification et les identifiants sont déterminés au démarrage,
 dans le thread appelant. Une route qui reviendrait vers le proxy local

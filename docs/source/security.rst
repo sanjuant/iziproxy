@@ -94,6 +94,11 @@ un avertissement donne la marche à suivre :
 Le téléchargement d'un PAC ``https://`` ne suit jamais une redirection vers
 ``http://``. Un PAC indisponible est retenté au bout d'une minute.
 
+Un PAC peut aussi contenir une boucle sans fin (falsifié ou simplement
+bogué). Il est donc évalué dans un processus Python séparé, arrêté au-delà
+de 10 secondes : le programme ne gèle pas, les connexions sont directes
+jusqu'à la nouvelle tentative (voir :doc:`advanced`).
+
 En CGI (``REQUEST_METHOD`` défini), la variable ``HTTP_PROXY`` est ignorée,
 comme dans urllib : elle peut provenir de l'en-tête ``Proxy:`` envoyé par
 le client (« httpoxy »).

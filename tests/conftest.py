@@ -115,7 +115,7 @@ def make_proxy(monkeypatch, tmp_path):
 
     def factory(auth=None, **kwargs):
         server = ProxyServer(auth=auth, **kwargs)
-        if auth in ("ntlm", "negotiate"):
+        if auth in ("ntlm", "negotiate", "both"):
             users = tmp_path / "ntlm_users.txt"
             users.write_text(f"{server.domain}:{server.username}:{server.password}\n")
             monkeypatch.setenv("NTLM_USER_FILE", str(users))
