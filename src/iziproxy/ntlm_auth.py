@@ -23,7 +23,6 @@ import socket
 import ssl
 from urllib.parse import urlsplit
 
-import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import (
     ConnectTimeout,
@@ -41,9 +40,11 @@ except ImportError:  # pragma: no cover
 
 from .proxy_utils import (
     build_ssl_context,
+    is_https_proxy,
     parse_proxy_authenticate,
     proxy_host_port,
     split_timeout,
+    wrap_tls,
 )
 from .secure_config import SecurePassword
 
@@ -102,18 +103,22 @@ class NtlmProxyAdapter(HTTPAdapter):
     Les URLs HTTPS passent par un tunnel CONNECT authentifié ; les URLs HTTP
     sont envoyées au proxy en forme absolue sur une connexion authentifiée.
     Les hôtes que le résolveur déclare « directs » sont contactés sans proxy.
+    Un proxy en https:// est joint en TLS (certificat vérifié selon
+    ``proxy_verify``) ; une cible HTTPS est alors chiffrée une seconde fois
+    dans le tunnel.
     """
 
     def __init__(self, proxy_url=None, username=None, password=None, domain=None,
-                 workstation=None, resolver=None, **kwargs):
+                 resolver=None, proxy_verify=True, **kwargs):
         """
         Args:
             proxy_url (str): URL du proxy (utilisée si aucun résolveur)
             username (str): Utilisateur ; None pour la session Windows courante
             password (str|SecurePassword): Mot de passe
             domain (str): Domaine NTLM
-            workstation (str): Nom du poste (par défaut : nom d'hôte)
             resolver (callable): url -> dict de proxys ({} = connexion directe)
+            proxy_verify (bool|str): Vérification du certificat d'un proxy
+                https:// (True : autorités du système, False, ou chemin CA)
         """
         super().__init__(**kwargs)
         if not NTLM_AVAILABLE:
@@ -125,7 +130,7 @@ class NtlmProxyAdapter(HTTPAdapter):
             password = SecurePassword(password) if password != "" else None
         self.password = password
         self.domain = domain or None
-        self.workstation = workstation or socket.gethostname()
+        self.proxy_verify = proxy_verify
         # Schéma retenu lors de la première négociation (évite une requête de sondage)
         self._scheme = None
 
@@ -196,28 +201,50 @@ class NtlmProxyAdapter(HTTPAdapter):
         ).lower()
         return "close" in values
 
-    def _open_socket(self, proxy_host, proxy_port, connect_timeout):
+    def _open_socket(self, proxy_url, connect_timeout, proxy_ssl_context=None):
+        """
+        Ouvre la connexion vers le proxy, en TLS pour un proxy https://.
+
+        Args:
+            proxy_ssl_context (ssl.SSLContext): Contexte TLS vers le proxy
+                (par défaut : construit selon proxy_verify)
+        """
+        proxy_host, proxy_port = proxy_host_port(proxy_url)
         try:
-            return socket.create_connection((proxy_host, proxy_port), timeout=connect_timeout)
+            sock = socket.create_connection((proxy_host, proxy_port), timeout=connect_timeout)
         except socket.timeout as exc:
             raise ConnectTimeout(f"Timed out connecting to proxy {proxy_host}:{proxy_port}") from exc
         except OSError as exc:
             raise ProxyError(f"Cannot connect to proxy {proxy_host}:{proxy_port}: {exc}") from exc
+        if not is_https_proxy(proxy_url):
+            return sock
+        try:
+            context = proxy_ssl_context or build_ssl_context(self.proxy_verify)
+            return context.wrap_socket(sock, server_hostname=proxy_host)
+        except socket.timeout as exc:
+            sock.close()
+            raise ConnectTimeout(f"TLS handshake timed out with proxy {proxy_host}:{proxy_port}") from exc
+        except (ssl.SSLError, OSError) as exc:
+            sock.close()
+            raise ProxyError(f"TLS handshake with proxy {proxy_host}:{proxy_port} failed: {exc}") from exc
 
     # ------------------------------------------------------------------ #
     # Négociation
     # ------------------------------------------------------------------ #
-    def _negotiate(self, proxy_host, proxy_port, connect_timeout, send_leg):
+    def _negotiate(self, proxy_url, connect_timeout, send_leg, proxy_ssl_context=None):
         """
         Réalise la négociation NTLM / Negotiate.
 
         Args:
+            proxy_url (str): URL du proxy (http:// ou https://)
             send_leg (callable): (sock, auth_header|None) -> HTTPResponse
+            proxy_ssl_context (ssl.SSLContext): Contexte TLS vers un proxy https://
 
         Returns:
             tuple: (socket, réponse finale non consommée)
         """
-        sock = self._open_socket(proxy_host, proxy_port, connect_timeout)
+        proxy_host, proxy_port = proxy_host_port(proxy_url)
+        sock = self._open_socket(proxy_url, connect_timeout, proxy_ssl_context)
         try:
             scheme = self._scheme
             if scheme is None:
@@ -236,7 +263,7 @@ class NtlmProxyAdapter(HTTPAdapter):
                     )
                 if closing:
                     sock.close()
-                    sock = self._open_socket(proxy_host, proxy_port, connect_timeout)
+                    sock = self._open_socket(proxy_url, connect_timeout, proxy_ssl_context)
 
             header_name = "NTLM" if scheme == "ntlm" else "Negotiate"
             try:
@@ -342,28 +369,31 @@ class NtlmProxyAdapter(HTTPAdapter):
             return super().send(request, stream=stream, timeout=timeout,
                                 verify=verify, cert=cert, proxies={})
 
-        proxy_host, proxy_port = proxy_host_port(proxy_url)
         connect_timeout, read_timeout = split_timeout(timeout)
         parts = urlsplit(request.url)
         method = request.method.upper()
+        # ``verify`` (requests) concerne le site ; le proxy suit proxy_verify
+        proxy_ctx = build_ssl_context(self.proxy_verify) if is_https_proxy(proxy_url) else None
 
         if parts.scheme == "https":
-            sock, response = self._send_https(request, parts, proxy_host, proxy_port,
+            sock, response = self._send_https(request, parts, proxy_url, proxy_ctx,
                                               connect_timeout, read_timeout, verify, cert)
         else:
-            sock, response = self._send_http(request, parts, proxy_host, proxy_port,
+            sock, response = self._send_http(request, parts, proxy_url, proxy_ctx,
                                              connect_timeout, read_timeout)
 
         return self._build(request, sock, response, method, stream)
 
-    def open_tunnel(self, proxy_host, proxy_port, authority, connect_timeout=None):
+    def open_tunnel(self, proxy_url, authority, connect_timeout=None, proxy_ssl_context=None):
         """
         Ouvre un tunnel CONNECT authentifié vers « hôte:port ».
 
         Utilisé par l'adaptateur (HTTPS) et par le proxy local.
 
         Args:
+            proxy_url (str): URL du proxy (http:// ou https://)
             authority (str): Cible du tunnel, au format « hôte:port »
+            proxy_ssl_context (ssl.SSLContext): Contexte TLS vers un proxy https://
 
         Returns:
             tuple: (socket, réponse finale du proxy, non consommée)
@@ -379,18 +409,18 @@ class NtlmProxyAdapter(HTTPAdapter):
             return self._read_response(sock, "CONNECT")
 
         try:
-            return self._negotiate(proxy_host, proxy_port, connect_timeout, connect_leg)
+            return self._negotiate(proxy_url, connect_timeout, connect_leg, proxy_ssl_context)
         except socket.timeout as exc:
-            raise ConnectTimeout(f"Timed out negotiating with proxy {proxy_host}:{proxy_port}") from exc
+            raise ConnectTimeout(f"Timed out negotiating with proxy {proxy_url}") from exc
 
-    def _send_https(self, request, parts, proxy_host, proxy_port,
+    def _send_https(self, request, parts, proxy_url, proxy_ctx,
                     connect_timeout, read_timeout, verify, cert):
         """Tunnel CONNECT authentifié puis requête chiffrée."""
         target_port = parts.port or 443
         authority = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
         authority = f"{authority}:{target_port}"
 
-        sock, response = self.open_tunnel(proxy_host, proxy_port, authority, connect_timeout)
+        sock, response = self.open_tunnel(proxy_url, authority, connect_timeout, proxy_ctx)
 
         if response.status != 200:
             status, reason = response.status, response.reason
@@ -402,7 +432,7 @@ class NtlmProxyAdapter(HTTPAdapter):
         try:
             ctx = build_ssl_context(verify, cert)
             sock.settimeout(connect_timeout)
-            tls = ctx.wrap_socket(sock, server_hostname=parts.hostname)
+            tls = wrap_tls(sock, ctx, parts.hostname)
         except ssl.SSLError as exc:
             sock.close()
             raise SSLError(exc) from exc
@@ -423,7 +453,7 @@ class NtlmProxyAdapter(HTTPAdapter):
             tls.close()
             raise ReadTimeout(f"Read timed out from {parts.hostname}") from exc
 
-    def _send_http(self, request, parts, proxy_host, proxy_port, connect_timeout, read_timeout):
+    def _send_http(self, request, parts, proxy_url, proxy_ctx, connect_timeout, read_timeout):
         """Requête HTTP en forme absolue sur une connexion proxy authentifiée."""
         absolute = request.url.split("#", 1)[0]
         body = self._body_bytes(request)
@@ -436,9 +466,9 @@ class NtlmProxyAdapter(HTTPAdapter):
             return self._read_response(sock, request.method.upper())
 
         try:
-            sock, response = self._negotiate(proxy_host, proxy_port, connect_timeout, http_leg)
+            sock, response = self._negotiate(proxy_url, connect_timeout, http_leg, proxy_ctx)
         except socket.timeout as exc:
-            raise ReadTimeout(f"Read timed out from proxy {proxy_host}:{proxy_port}") from exc
+            raise ReadTimeout(f"Read timed out from proxy {proxy_url}") from exc
         sock.settimeout(read_timeout)
         return sock, response
 
@@ -471,33 +501,3 @@ class NtlmProxyAdapter(HTTPAdapter):
                 raw.close()
         return result
 
-
-class NtlmProxyManager:
-    """
-    Fabrique conservée pour compatibilité : crée une session requests
-    utilisant NtlmProxyAdapter.
-    """
-
-    def __init__(self):
-        if not NTLM_AVAILABLE:
-            raise ImportError("NTLM support requires pyspnego: pip install iziproxy[ntlm]")
-
-    def create_ntlm_proxy_session(self, proxy_host, proxy_port, username=None, password=None,
-                                  domain="", workstation=None, debug=False):
-        """
-        Crée une session requests configurée pour un proxy NTLM.
-
-        Returns:
-            requests.Session: Session prête à l'emploi
-        """
-        adapter = NtlmProxyAdapter(
-            proxy_url=f"http://{proxy_host}:{proxy_port}",
-            username=username,
-            password=password,
-            domain=domain,
-            workstation=workstation,
-        )
-        session = requests.Session()
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        return session

@@ -11,7 +11,7 @@ import threading
 
 import urllib3
 
-from ..proxy_utils import basic_proxy_authorization, strip_credentials
+from ..proxy_utils import basic_proxy_authorization, is_https_proxy, strip_credentials
 
 
 class IziPoolManager(urllib3.PoolManager):
@@ -47,6 +47,9 @@ class IziPoolManager(urllib3.PoolManager):
                 auth = basic_proxy_authorization(proxy)
                 if auth:
                     headers["Proxy-Authorization"] = auth
+                if is_https_proxy(proxy):
+                    # Certificat du proxy vérifié selon verify d'IziProxy
+                    self._options.setdefault("proxy_ssl_context", self.izi._proxy_ssl_context())
                 manager = urllib3.ProxyManager(strip_credentials(proxy), proxy_headers=headers,
                                                **self._options)
                 self._proxy_managers[proxy] = manager

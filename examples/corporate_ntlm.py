@@ -5,7 +5,7 @@ Prérequis : pip install iziproxy[ntlm]
 
 Sous Windows, aucun mot de passe n'est nécessaire : la session Windows
 courante est utilisée (SSPI). Ailleurs, les identifiants sont cherchés dans
-IZI_USERNAME / IZI_PASSWORD / IZI_DOMAIN, le fichier .env, le trousseau
+IZIPROXY_USERNAME / IZIPROXY_PASSWORD / IZIPROXY_DOMAIN, le fichier .env, le trousseau
 système, puis demandés une seule fois et enregistrés dans le trousseau.
 """
 

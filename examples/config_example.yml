@@ -21,8 +21,7 @@ environments:
 no_proxy: "<local>,*.internal.example.com"
 
 environment_detection:
-  method: auto                    # auto, env_var, hostname, ip, ask
-  env_var_name: APP_ENV           # variable supplémentaire (IZIPROXY_ENV reste prioritaire)
+  method: auto                    # auto, env_var (IZIPROXY_ENV), hostname, ip, ask
   hostname_patterns:
     dev: ["-dev", "staging"]
     prod: ["-prod"]
@@ -36,6 +35,10 @@ system_proxy:
   use_system_proxy: true
   detect_env_vars: true
   detect_pac: true                # nécessite pip install iziproxy[pac]
+
+# Certificats du proxy https:// et du fichier PAC : true (autorités du
+# système, recommandé avec pip install iziproxy[truststore]), false, ou chemin
+verify: true
 
 credentials:
   prompt: true                    # false pour ne jamais demander (serveurs, CI)

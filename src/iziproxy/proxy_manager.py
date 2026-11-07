@@ -11,14 +11,16 @@ import requests
 
 from .adapters import IziProxyAdapter
 from .config_manager import ConfigManager
-from .env_detector import EnvironmentDetector
+from .env_detector import EnvironmentDetector, normalize_environment
 from .local_proxy import LocalProxy
 from .logger import enable_debug_logging, disable_debug_logging, get_logger
 from .proxy_detector import ProxyDetector
 from .proxy_utils import (
+    build_ssl_context,
     extract_credentials,
     has_credentials,
     inject_credentials,
+    is_https_proxy,
     no_proxy_for_env,
     normalize_proxy_url,
     parse_no_proxy,
@@ -63,13 +65,14 @@ class IziProxy:
 
     def __init__(self, config_path=None, proxy_url=None, pac_url=None, environment=None,
                  username=None, password=None, domain=None, auth_type=None,
-                 no_proxy=None, interactive=None, debug=False):
+                 no_proxy=None, interactive=None, verify=None, debug=False):
         """
         Args:
             config_path (str): Fichier de configuration YAML
             proxy_url (str): Proxy à utiliser (prioritaire sur toute détection)
             pac_url (str): Fichier PAC à utiliser (URL ou chemin)
-            environment (str): Forcer l'environnement ('local', 'dev', 'prod')
+            environment (str): Forcer l'environnement ('local', 'dev', 'prod' ou
+                un alias reconnu : 'production', 'staging'...)
             username (str): Nom d'utilisateur du proxy
             password (str): Mot de passe du proxy
             domain (str): Domaine NTLM
@@ -77,6 +80,11 @@ class IziProxy:
             no_proxy (str|list): Hôtes supplémentaires à contacter sans proxy
             interactive (bool): Autoriser la saisie des identifiants manquants
                 (None : valeur de la configuration, vrai par défaut)
+            verify (bool|str): Vérification des certificats du proxy https:// et
+                du fichier PAC : True (autorités du système, défaut), False ou
+                chemin vers un fichier / répertoire d'autorités (None : clé
+                ``verify`` de la configuration). Les certificats des sites
+                restent vérifiés par chaque client (``verify`` de requests...).
             debug (bool): Afficher les journaux détaillés
         """
         if debug:
@@ -84,7 +92,11 @@ class IziProxy:
 
         self.proxy_url_override = normalize_proxy_url(proxy_url)
         self.pac_url_override = pac_url
-        self.env_override = environment.lower() if environment else None
+        self.env_override = None
+        if environment:
+            self.env_override = normalize_environment(environment)
+            if self.env_override is None:
+                raise ValueError(f"Unknown environment {environment!r}: expected local, dev or prod")
         self.username_override = username
         self.password_override = password
         self.domain_override = domain
@@ -94,8 +106,9 @@ class IziProxy:
 
         self.config_manager = ConfigManager(config_path)
         self.config = self.config_manager.get_config()
+        self.verify = self._resolve_verify(verify)
         self.env_detector = EnvironmentDetector(self.config)
-        self.proxy_detector = ProxyDetector(self.config.get("system_proxy", {}))
+        self.proxy_detector = ProxyDetector(self.config.get("system_proxy", {}), verify=self.verify)
 
         self.current_env = self.env_override or self.env_detector.detect_environment()
 
@@ -127,6 +140,19 @@ class IziProxy:
     # ------------------------------------------------------------------ #
     # Résolution du proxy
     # ------------------------------------------------------------------ #
+    def _resolve_verify(self, verify):
+        """Valide l'option verify (paramètre, sinon configuration, sinon True)."""
+        value = self.config.get("verify", True) if verify is None else verify
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip():
+            return os.path.expanduser(value.strip())
+        raise ValueError(f"Invalid verify value {value!r}: expected True, False or a CA bundle path")
+
+    def _proxy_ssl_context(self):
+        """Contexte TLS vers un proxy https:// (selon verify)."""
+        return build_ssl_context(self.verify)
+
     def _env_config(self):
         return self.config_manager.get_environment_config(self.current_env) or {}
 
@@ -241,7 +267,8 @@ class IziProxy:
                 required = True if required is None else required
                 auth_type = auth_type or "basic"
             elif proxy and (required is None or (required and auth_type is None)):
-                status, schemes = probe_proxy_auth(proxy)
+                status, schemes = probe_proxy_auth(
+                    proxy, ssl_context=self._proxy_ssl_context() if is_https_proxy(proxy) else None)
                 logger.debug("Proxy probe %s -> status=%s schemes=%s",
                              strip_credentials(proxy), status, list(schemes))
                 if required is None:
@@ -321,7 +348,7 @@ class IziProxy:
         """Crée l'adaptateur NTLM avec les identifiants courants."""
         username, password, domain = self._get_credentials()
         return NtlmProxyAdapter(resolver=self._raw_proxies, username=username,
-                                password=password, domain=domain, **kwargs)
+                                password=password, domain=domain, proxy_verify=self.verify, **kwargs)
 
     def _resolve(self, url=None):
         """
@@ -353,10 +380,6 @@ class IziProxy:
     @property
     def environment(self):
         """Environnement courant ('local', 'dev', 'prod')."""
-        return self.current_env
-
-    def get_current_environment(self):
-        """Retourne l'environnement courant."""
         return self.current_env
 
     def get_proxy_url(self, url=None):
@@ -663,11 +686,12 @@ class IziProxy:
         ws:// ou wss:// (None : connexion directe).
 
         websockets ne décode pas les identifiants de l'URL du proxy (un mot
-        de passe encodé serait envoyé tel quel) : avec un proxy authentifié,
-        la connexion passe par le proxy local partagé.
+        de passe encodé serait envoyé tel quel) et ne reçoit pas l'option
+        verify : avec un proxy authentifié ou https://, la connexion passe
+        par le proxy local partagé.
         """
         proxy = self.proxy_for(uri)
-        if proxy and has_credentials(proxy):
+        if proxy and (has_credentials(proxy) or is_https_proxy(proxy)):
             return self.local_proxy_url()
         return proxy
 
@@ -721,10 +745,15 @@ class IziProxy:
         if local_proxy:
             values = self._local_proxy_env()
         else:
+            # Un proxy local démarré par un appel précédent n'a plus d'usage
+            local, self._env_local_proxy = self._env_local_proxy, None
+            if local is not None:
+                local.stop()
             values = self._direct_env()
 
         if self._saved_env is None:
             self._saved_env = {name: os.environ.get(name) for name in _PROXY_ENV_VARS}
+            self.proxy_detector.env_overrides = dict(self._saved_env)
         os.environ.update(values)
         logger.debug("Proxy environment variables set: %s", sorted(values))
         return values
@@ -775,6 +804,7 @@ class IziProxy:
             else:
                 os.environ[name] = value
         self._saved_env = None
+        self.proxy_detector.env_overrides = {}
         logger.debug("Proxy environment variables restored")
 
     def patch_requests(self):

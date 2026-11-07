@@ -33,7 +33,8 @@ pip install iziproxy[ntlm]      # + NTLM / Negotiate (pyspnego)
 pip install iziproxy[pac]       # + fichiers PAC (pypac)
 pip install iziproxy[httpx]     # + adaptateur httpx
 pip install iziproxy[aiohttp]   # + adaptateur aiohttp
-pip install iziproxy[all]       # NTLM + PAC
+pip install iziproxy[truststore] # + vérification TLS par le système (Python 3.10+)
+pip install iziproxy[all]       # NTLM + PAC + truststore
 ```
 
 Python 3.8 ou plus récent.
@@ -81,11 +82,12 @@ Ajoutez seulement ce qui manque, du plus simple au plus précis :
 | Situation | Solution |
 |---|---|
 | Le proxy n'est pas détecté | `iziproxy.install(proxy_url="proxy.corp:8080")` ou `iziproxy.install(pac_url="http://wpad/proxy.pac")` |
-| Les identifiants ne sont pas trouvés | `iziproxy.install(username="jdupont", password="...", domain="CORP")`, variables `IZI_USERNAME` / `IZI_PASSWORD`, ou la saisie interactive (mémorisée dans le trousseau) |
+| Les identifiants ne sont pas trouvés | `iziproxy.install(username="jdupont", password="...", domain="CORP")`, variables `IZIPROXY_USERNAME` / `IZIPROXY_PASSWORD`, ou la saisie interactive (mémorisée dans le trousseau) |
 | Pas de saisie interactive (service, CI) | `iziproxy.install(interactive=False)` |
 | Certains hôtes doivent rester en direct | `iziproxy.install(no_proxy=["*.corp.local", "10.0.0.0/8"])` |
 | Réglages différents selon local / dev / prod | fichier `iziproxy.yml` (voir Configuration ci-dessous), puis `install()` sans paramètre |
 | Ne configurer que certains clients | `iziproxy.install(urllib=False, env_vars=False)` |
+| Certificat du proxy https:// ou du PAC refusé | `pip install iziproxy[truststore]` (autorités du système), sinon `iziproxy.install(verify="/chemin/ca-entreprise.pem")` |
 | Comprendre ce qui se passe | `iziproxy.install(debug=True)` |
 | Réglage fin d'un client précis | `iziproxy.current().proxy` est l'instance `IziProxy` (voir ci-dessous) |
 
@@ -179,6 +181,7 @@ proxy = IziProxy(
     no_proxy="*.corp.example,<local>",          # exclusions supplémentaires
     environment="prod",                         # forcer l'environnement
     interactive=False,                          # ne jamais demander d'identifiants
+    verify="/chemin/ca.pem",                    # certificats du proxy https:// et du PAC
     debug=True,                                 # journaux détaillés sur stderr
 )
 ```
@@ -225,17 +228,31 @@ Un exemple complet est fourni dans [examples/config_example.yml](examples/config
 |---|---|
 | Proxy | `proxy_url=` → `pac_url=` → configuration de l'environnement → variables d'environnement → paramètres système → PAC système → connexion directe |
 | Authentification | paramètres → `requires_auth` / `auth_type` de la configuration → sondage du proxy |
-| Identifiants | `username=` / `password=` → URL du proxy → `IZI_*` / `PROXY_*` → `.env` → trousseau → session courante (NTLM Windows) → saisie |
-| Environnement | `environment=` → `IZIPROXY_ENV`, `APP_ENV`, `ENVIRONMENT`... → nom d'hôte → IP → `local` |
+| Identifiants | `username=` / `password=` → URL du proxy → `IZIPROXY_*` → `.env` → trousseau → session courante (NTLM Windows) → saisie |
+| Environnement | `environment=` → `IZIPROXY_ENV` → nom d'hôte → IP → `local` |
+
+### Variables d'environnement
+
+IziProxy ne lit que ces variables :
+
+| Variable | Rôle |
+|---|---|
+| `IZIPROXY_USERNAME`, `IZIPROXY_PASSWORD`, `IZIPROXY_DOMAIN` | identifiants du proxy (aussi lus dans un fichier `.env`) |
+| `IZIPROXY_ENV` | force l'environnement (`local`, `dev`, `prod` ou un alias : `production`, `staging`...) |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (ou en minuscules) | proxy déclaré par le système, comme pour curl ou pip |
+
+`install()` et `set_environment_variables()` écrivent `HTTP_PROXY`,
+`HTTPS_PROXY` et `NO_PROXY` (majuscules et minuscules, car curl ne lit que
+les minuscules) et les restaurent à la fin.
 
 ### Identifiants
 
 Ne stockez pas les mots de passe dans le fichier de configuration.
 
 ```bash
-IZI_USERNAME=mon_utilisateur
-IZI_PASSWORD=mon_mot_de_passe
-IZI_DOMAIN=mon_domaine          # NTLM
+IZIPROXY_USERNAME=mon_utilisateur
+IZIPROXY_PASSWORD=mon_mot_de_passe
+IZIPROXY_DOMAIN=mon_domaine          # NTLM
 ```
 
 Ces variables peuvent aussi être placées dans un fichier `.env` (répertoire

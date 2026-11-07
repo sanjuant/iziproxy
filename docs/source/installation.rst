@@ -8,6 +8,7 @@ IziProxy nécessite Python 3.8 ou plus récent.
    pip install iziproxy            # proxys sans authentification ou Basic
    pip install iziproxy[ntlm]      # + NTLM / Negotiate (pyspnego)
    pip install iziproxy[pac]       # + fichiers PAC (pypac)
+   pip install iziproxy[truststore] # + vérification TLS par le système (Python 3.10+)
    pip install iziproxy[all]       # tout
 
 Dépendances

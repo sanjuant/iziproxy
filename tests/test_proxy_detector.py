@@ -21,10 +21,16 @@ def test_lowercase_env_vars_win(monkeypatch):
     assert ProxyDetector().detect_system_proxy()["https"] == "http://lower:2"
 
 
-def test_all_proxy(monkeypatch):
+def test_all_proxy_is_ignored(monkeypatch):
     monkeypatch.setenv("ALL_PROXY", "http://all:3128")
-    settings = ProxyDetector().detect_system_proxy()
-    assert settings["http"] == settings["https"] == "http://all:3128"
+    assert ProxyDetector({"use_system_proxy": True}).detect_system_proxy().get("http") is None
+
+
+def test_env_overrides_replace_the_environment(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    detector = ProxyDetector()
+    detector.env_overrides = {"HTTP_PROXY": "http://original:8080", "http_proxy": "http://original:8080"}
+    assert detector.detect_system_proxy()["http"] == "http://original:8080"
 
 
 def test_env_vars_can_be_disabled(monkeypatch):

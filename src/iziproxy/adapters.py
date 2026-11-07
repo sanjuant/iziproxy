@@ -10,12 +10,11 @@ Le type d'authentification n'est déterminé qu'à la première requête qui
 passe réellement par le proxy : créer une session ne coûte rien.
 """
 
-import base64
 import threading
 
 from requests.adapters import HTTPAdapter
 
-from .proxy_utils import extract_credentials
+from .proxy_utils import basic_proxy_authorization, is_https_proxy
 
 
 class IziProxyAdapter(HTTPAdapter):
@@ -53,12 +52,18 @@ class IziProxyAdapter(HTTPAdapter):
         latin-1 ; on utilise UTF-8 (RFC 7617, navigateurs modernes) afin que
         les mots de passe accentués fonctionnent.
         """
-        headers = {}
-        username, password = extract_credentials(proxy)
-        if username:
-            token = f"{username}:{password or ''}".encode("utf-8")
-            headers["Proxy-Authorization"] = "Basic " + base64.b64encode(token).decode("ascii")
-        return headers
+        auth = basic_proxy_authorization(proxy)
+        return {"Proxy-Authorization": auth} if auth else {}
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        """
+        Gestionnaire urllib3 du proxy. Pour un proxy https://, le certificat
+        du proxy est vérifié selon ``verify`` d'IziProxy (autorités du
+        système par défaut) et non selon le bundle certifi de requests.
+        """
+        if is_https_proxy(proxy) and "proxy_ssl_context" not in proxy_kwargs:
+            proxy_kwargs["proxy_ssl_context"] = self.izi._proxy_ssl_context()
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         """Envoie la requête avec le proxy déterminé pour son URL."""

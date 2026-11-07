@@ -100,7 +100,7 @@ paramètres de :class:`iziproxy.IziProxy`.
      - ``install(proxy_url="proxy.corp:8080")`` ou ``install(pac_url="http://wpad/proxy.pac")``
    * - Les identifiants ne sont pas trouvés
      - ``install(username="jdupont", password="...", domain="CORP")``, variables
-       ``IZI_USERNAME`` / ``IZI_PASSWORD`` / ``IZI_DOMAIN``, ou saisie interactive
+       ``IZIPROXY_USERNAME`` / ``IZIPROXY_PASSWORD`` / ``IZIPROXY_DOMAIN``, ou saisie interactive
        (mémorisée dans le trousseau système)
    * - Pas de saisie interactive (service, CI)
      - ``install(interactive=False)``

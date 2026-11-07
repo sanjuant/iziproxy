@@ -218,6 +218,19 @@ def test_clear_environment_variables_stops_the_local_proxy(ntlm_izi, monkeypatch
         socket.create_connection(("127.0.0.1", port), timeout=2).close()
 
 
+def test_switching_to_direct_variables_stops_the_local_proxy(make_proxy):
+    izi = IziProxy(proxy_url=make_proxy().url)
+    local_url = izi.set_environment_variables(local_proxy=True)["HTTPS_PROXY"]
+    port = int(local_url.rsplit(":", 1)[1])
+
+    izi.set_environment_variables()
+
+    assert os.environ["HTTPS_PROXY"] == izi.get_proxy_url()
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+    izi.clear_environment_variables()
+
+
 def test_handle_api_and_context_manager(make_proxy):
     proxy = make_proxy()
     izi = IziProxy(proxy_url=proxy.url)

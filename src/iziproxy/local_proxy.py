@@ -19,21 +19,20 @@ avec « Connection: close ») ; le proxy n'exige aucune authentification de
 ses clients et n'écoute que sur la boucle locale.
 """
 
-import base64
 import http.client
 import logging
 import socket
 import socketserver
-import ssl
 import threading
 from urllib.parse import urlsplit
 
 from .ntlm_auth import NtlmProxyAdapter
-from .proxy_utils import extract_credentials, normalize_proxy_url, proxy_host_port
+from .proxy_utils import basic_proxy_authorization, is_https_proxy, proxy_host_port
 
 logger = logging.getLogger("iziproxy")
 
 LISTEN_HOST = "127.0.0.1"
+_LOOPBACK_NAMES = (LISTEN_HOST, "localhost", "::1")
 
 # En-têtes propres à un saut (RFC 9110 §7.6.1) : jamais relayés tels quels
 _HOP_BY_HOP = {
@@ -156,7 +155,10 @@ def _pipe(read, dst):
         pass
     finally:
         try:
-            dst.shutdown(socket.SHUT_WR)
+            # socket.socket.shutdown et non dst.shutdown : sur une SSLSocket
+            # (proxy https://), ce dernier abandonnerait la session TLS alors
+            # que l'autre sens du tunnel la lit encore
+            socket.socket.shutdown(dst, socket.SHUT_WR)
         except OSError:
             pass
 
@@ -375,7 +377,7 @@ class LocalProxy:
         if not proxy:
             return None, "direct"
         host, port = proxy_host_port(proxy)
-        if port == self.port and host in (LISTEN_HOST, "localhost", "::1"):
+        if port == self.port and host in _LOOPBACK_NAMES:
             raise _LoopDetected(f"The proxy chosen for {url} is this local proxy ({self.url})")
         if self.izi._uses_ntlm():
             return proxy, "ntlm"
@@ -390,18 +392,13 @@ class LocalProxy:
     def _basic_header(self, url, proxy):
         """En-tête Proxy-Authorization Basic (UTF-8), ou None."""
         resolved = self.izi._resolve(url)
-        candidate = resolved.get(urlsplit(url).scheme) or proxy
-        username, password = extract_credentials(candidate)
-        if not username:
-            return None
-        token = f"{username}:{password or ''}".encode("utf-8")
-        return "Basic " + base64.b64encode(token).decode("ascii")
+        return basic_proxy_authorization(resolved.get(urlsplit(url).scheme) or proxy)
 
     def _connect(self, host, port, tls_host=None):
         sock = socket.create_connection((host, port), timeout=self.timeout)
         if tls_host:
             try:
-                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=tls_host)
+                sock = self.izi._proxy_ssl_context().wrap_socket(sock, server_hostname=tls_host)
             except Exception:
                 sock.close()
                 raise
@@ -409,8 +406,7 @@ class LocalProxy:
 
     def _connect_proxy(self, proxy):
         host, port = proxy_host_port(proxy)
-        tls = normalize_proxy_url(proxy).lower().startswith("https://")
-        return self._connect(host, port, tls_host=host if tls else None)
+        return self._connect(host, port, tls_host=host if is_https_proxy(proxy) else None)
 
     # -------------------------------------------------------------- #
     # Tunnels
@@ -431,8 +427,7 @@ class LocalProxy:
             return self._connect(host, port), None
 
         if mode == "ntlm":
-            proxy_host, proxy_port = proxy_host_port(proxy)
-            sock, response = self._ntlm().open_tunnel(proxy_host, proxy_port, authority, self.timeout)
+            sock, response = self._ntlm().open_tunnel(proxy, authority, self.timeout)
             return self._tunnel_result(sock, response)
 
         sock = self._connect_proxy(proxy)
@@ -489,8 +484,6 @@ class LocalProxy:
         logger.debug("Local proxy: %s %s via %s", method, absolute, proxy or "direct")
 
         if mode == "ntlm":
-            proxy_host, proxy_port = proxy_host_port(proxy)
-
             def http_leg(sock, auth_header):
                 extra = [("Proxy-Connection", "Keep-Alive"), ("Connection", "Keep-Alive")]
                 if auth_header:
@@ -498,7 +491,7 @@ class LocalProxy:
                 sock.sendall(self._serialize(method, absolute, parts, headers, body, extra))
                 return NtlmProxyAdapter._read_response(sock, method)
 
-            sock, response = self._ntlm()._negotiate(proxy_host, proxy_port, self.timeout, http_leg)
+            sock, response = self._ntlm()._negotiate(proxy, self.timeout, http_leg)
             sock.settimeout(self.timeout)
             return sock, response
 

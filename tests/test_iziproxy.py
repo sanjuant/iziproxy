@@ -149,8 +149,8 @@ def test_basic_auth_special_characters(make_proxy, origin):
 def test_auth_is_autodetected_and_credentials_found_in_env(make_proxy, origin, monkeypatch):
     """requires_auth absent de la configuration : le 407 est détecté par sondage."""
     proxy = make_proxy(auth="basic")
-    monkeypatch.setenv("IZI_USERNAME", proxy.username)
-    monkeypatch.setenv("IZI_PASSWORD", proxy.password)
+    monkeypatch.setenv("IZIPROXY_USERNAME", proxy.username)
+    monkeypatch.setenv("IZIPROXY_PASSWORD", proxy.password)
 
     izi = IziProxy(proxy_url=proxy.url)
 
@@ -246,6 +246,12 @@ def test_pac_file_is_evaluated_per_host(make_proxy, origin, tmp_path):
 # ---------------------------------------------------------------------- #
 # Variables d'environnement et patch
 # ---------------------------------------------------------------------- #
+def test_environment_aliases_and_invalid_values():
+    assert IziProxy(environment="Production").environment == "prod"
+    with pytest.raises(ValueError, match="Unknown environment"):
+        IziProxy(environment="moon")
+
+
 def test_environment_variables_are_restored(make_proxy, monkeypatch):
     proxy = make_proxy()
     monkeypatch.setenv("NO_PROXY", "previous")

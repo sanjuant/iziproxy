@@ -18,10 +18,8 @@ from servers import OriginServer, ProxyServer  # noqa: E402
 
 ISOLATED_VARS = [
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-    "IZI_USERNAME", "IZI_PASSWORD", "IZI_DOMAIN",
-    "PROXY_USERNAME", "PROXY_PASSWORD", "PROXY_DOMAIN",
-    "IZIPROXY_ENV", "PROXY_ENV", "APP_ENV", "ENVIRONMENT", "ENVIRONMENT_TYPE", "DEPLOY_ENV", "STAGE",
-    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "IZIPROXY_USERNAME", "IZIPROXY_PASSWORD", "IZIPROXY_DOMAIN", "IZIPROXY_ENV",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
 ]
 
 
@@ -107,7 +105,12 @@ def tls_origin():
 
 @pytest.fixture
 def make_proxy(monkeypatch, tmp_path):
-    """Fabrique de proxys locaux ; NTLM_USER_FILE est préparé pour NTLM."""
+    """
+    Fabrique de proxys locaux ; NTLM_USER_FILE est préparé pour NTLM.
+
+    Avec tls=True, le certificat auto-signé du proxy est dans cert_path (à
+    passer en verify=).
+    """
     servers = []
 
     def factory(auth=None, **kwargs):

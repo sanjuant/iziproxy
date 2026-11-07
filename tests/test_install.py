@@ -128,6 +128,24 @@ def test_uninstall_restores_everything(ntlm_proxy, origin, monkeypatch):
     iziproxy.uninstall()  # sans effet
 
 
+def test_refresh_after_install_keeps_the_corporate_proxy(make_proxy, origin, monkeypatch):
+    """Proxy trouvé dans HTTP_PROXY : après install(), refresh() ne doit pas boucler sur le proxy local."""
+    proxy = make_proxy(auth="basic")
+    monkeypatch.setenv("HTTP_PROXY", proxy.url)
+    monkeypatch.setenv("HTTPS_PROXY", proxy.url)
+    monkeypatch.setenv("IZIPROXY_USERNAME", proxy.username)
+    monkeypatch.setenv("IZIPROXY_PASSWORD", proxy.password)
+
+    installation = iziproxy.install()
+    assert os.environ["HTTP_PROXY"] == installation.local_proxy_url
+    installation.proxy.refresh()
+
+    assert installation.proxy.get_proxy_url() == proxy.url
+    assert requests.get(origin.url("/echo")).status_code == 200
+    iziproxy.uninstall()
+    assert os.environ["HTTP_PROXY"] == proxy.url
+
+
 def test_context_manager(ntlm_proxy, origin):
     with install_ntlm(ntlm_proxy) as installation:
         assert installation.active

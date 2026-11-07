@@ -68,26 +68,33 @@ def test_no_credentials_when_auth_not_required():
 
 
 def test_credentials_from_env_vars(monkeypatch):
-    monkeypatch.setenv("IZI_USERNAME", "envuser")
-    monkeypatch.setenv("PROXY_PASSWORD", "envpass")
-    monkeypatch.setenv("IZI_DOMAIN", "CORP")
+    monkeypatch.setenv("IZIPROXY_USERNAME", "envuser")
+    monkeypatch.setenv("IZIPROXY_PASSWORD", "envpass")
+    monkeypatch.setenv("IZIPROXY_DOMAIN", "CORP")
     user, password, domain = ConfigManager().get_credentials("dev", auth_required=True)
     assert (user, password.get_password(), domain) == ("envuser", "envpass", "CORP")
+
+
+@pytest.mark.parametrize("name", ["IZI_USERNAME", "PROXY_USERNAME", "izi_username"])
+def test_other_credential_variables_are_ignored(monkeypatch, name):
+    monkeypatch.setattr("getpass.getuser", lambda: "sessionuser")
+    monkeypatch.setenv(name, "envuser")
+    assert ConfigManager().get_credentials("dev", auth_required=True, prompt=False)[0] == "sessionuser"
 
 
 def test_credentials_from_dotenv(tmp_path):
     write(tmp_path / "work" / ".env", """
         # commentaire
-        export IZI_USERNAME=dotuser
-        IZI_PASSWORD="p=ss#word"
+        export IZIPROXY_USERNAME=dotuser
+        IZIPROXY_PASSWORD="p=ss#word"
     """)
     user, password, _ = ConfigManager().get_credentials("dev", auth_required=True, prompt=False)
     assert (user, password.get_password()) == ("dotuser", "p=ss#word")
 
 
 def test_env_vars_override_dotenv(tmp_path, monkeypatch):
-    write(tmp_path / "work" / ".env", "IZI_USERNAME=dotuser\nIZI_PASSWORD=dotpass\n")
-    monkeypatch.setenv("IZI_PASSWORD", "envpass")
+    write(tmp_path / "work" / ".env", "IZIPROXY_USERNAME=dotuser\nIZIPROXY_PASSWORD=dotpass\n")
+    monkeypatch.setenv("IZIPROXY_PASSWORD", "envpass")
     user, password, _ = ConfigManager().get_credentials("dev", auth_required=True)
     assert (user, password.get_password()) == ("dotuser", "envpass")
 
@@ -114,8 +121,8 @@ def test_prompt_disabled_returns_partial_credentials(monkeypatch):
 
 def test_requires_auth_from_config(tmp_path, monkeypatch):
     write(tmp_path / "work" / "iziproxy.yml", "environments: {dev: {requires_auth: true}}")
-    monkeypatch.setenv("IZI_USERNAME", "u")
-    monkeypatch.setenv("IZI_PASSWORD", "p")
+    monkeypatch.setenv("IZIPROXY_USERNAME", "u")
+    monkeypatch.setenv("IZIPROXY_PASSWORD", "p")
     assert ConfigManager().get_credentials("dev")[0] == "u"
 
 
@@ -184,26 +191,28 @@ def test_normalize_environment(value, expected):
 
 
 def test_env_var_detection(monkeypatch):
-    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("IZIPROXY_ENV", "production")
     assert EnvironmentDetector().detect_environment() == "prod"
 
 
-def test_iziproxy_env_has_priority(monkeypatch):
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("IZIPROXY_ENV", "dev")
-    assert EnvironmentDetector().detect_environment() == "dev"
+@pytest.mark.parametrize("name", ["APP_ENV", "ENVIRONMENT", "STAGE", "PROXY_ENV"])
+def test_only_iziproxy_env_is_read(monkeypatch, name):
+    monkeypatch.setenv(name, "production")
+    detector = EnvironmentDetector({"environment_detection": {"method": "env_var"}})
+    assert detector.detect_environment() == "local"
+
+
+def test_unknown_iziproxy_env_value_is_reported(monkeypatch, caplog):
+    monkeypatch.setenv("IZIPROXY_ENV", "moon")
+    detector = EnvironmentDetector({"environment_detection": {"method": "env_var"}})
+    assert detector.detect_environment() == "local"
+    assert "Unknown IZIPROXY_ENV value" in caplog.text
 
 
 def test_sh_env_variable_is_ignored(monkeypatch):
     monkeypatch.setenv("ENV", "/home/devops/.shrc")
     detector = EnvironmentDetector({"environment_detection": {"method": "env_var"}})
     assert detector.detect_environment() == "local"
-
-
-def test_custom_env_var_name(monkeypatch):
-    monkeypatch.setenv("MY_STAGE", "prod")
-    detector = EnvironmentDetector({"environment_detection": {"env_var_name": "MY_STAGE"}})
-    assert detector.detect_environment() == "prod"
 
 
 @pytest.mark.parametrize("hostname, expected", [

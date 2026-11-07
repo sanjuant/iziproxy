@@ -25,15 +25,29 @@ import time
 # ---------------------------------------------------------------------- #
 # Certificat auto-signé
 # ---------------------------------------------------------------------- #
-def make_self_signed_cert(directory):
-    """Génère un certificat auto-signé et retourne (cert_path, key_path)."""
+def make_self_signed_cert(directory, names=("origin.test",)):
+    """
+    Génère un certificat auto-signé (servant aussi d'autorité) et retourne
+    (cert_path, key_path).
+
+    Args:
+        names: Noms DNS ou adresses IP couverts par le certificat
+    """
+    import ipaddress
+
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "origin.test")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, names[0])])
+    alt_names = []
+    for value in names:
+        try:
+            alt_names.append(x509.IPAddress(ipaddress.ip_address(value)))
+        except ValueError:
+            alt_names.append(x509.DNSName(value))
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
@@ -43,7 +57,8 @@ def make_self_signed_cert(directory):
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName("origin.test")]), critical=False)
+        .add_extension(x509.SubjectAlternativeName(alt_names), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
     cert_path = os.path.join(directory, "cert.pem")
@@ -139,9 +154,9 @@ class OriginServer:
         self.tls = tls
         if tls:
             self._tmp = tempfile.mkdtemp()
-            cert, key = make_self_signed_cert(self._tmp)
+            self.cert_path, key = make_self_signed_cert(self._tmp, ("origin.test", "127.0.0.1"))
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(cert, key)
+            ctx.load_cert_chain(self.cert_path, key)
             self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05},
@@ -176,7 +191,8 @@ def _pipe(src, dst):
     finally:
         for sock in (src, dst):
             try:
-                sock.shutdown(socket.SHUT_RDWR)
+                # Pas sock.shutdown() : sur une SSLSocket il abandonnerait la session TLS
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
             except OSError:
                 pass
 
@@ -322,11 +338,20 @@ class ProxyServer:
 
     Args:
         auth: None, 'basic', 'ntlm' ou 'negotiate'
+        tls (bool): Proxy https:// (les clients lui parlent en TLS) ; son
+            certificat auto-signé est dans ``cert_path``
     """
 
     def __init__(self, auth=None, username="alice", password="S3cret!", domain="CORP",
-                 close_on_challenge_request=False):
+                 close_on_challenge_request=False, tls=False):
         self.server = _ThreadingTCPServer(("127.0.0.1", 0), ProxyHandler)
+        self.cert_path = None
+        if tls:
+            self._tmp = tempfile.mkdtemp()
+            self.cert_path, key = make_self_signed_cert(self._tmp, ("localhost", "127.0.0.1"))
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(self.cert_path, key)
+            self.server.socket = ctx.wrap_socket(self.server.socket, server_side=True)
         self.server.auth = auth
         self.server.username = username
         self.server.password = password
@@ -335,7 +360,7 @@ class ProxyServer:
         self.server.close_on_challenge_request = close_on_challenge_request
         self.username, self.password, self.domain = username, password, domain
         self.port = self.server.server_address[1]
-        self.url = f"http://127.0.0.1:{self.port}"
+        self.url = f"{'https' if tls else 'http'}://127.0.0.1:{self.port}"
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05},
                                        daemon=True)
         self.thread.start()

@@ -28,6 +28,9 @@ class IziProxyHandler(urllib.request.BaseHandler):
 
     def _route(self, request):
         proxy = self.izi.proxy_for(request.full_url)
+        if proxy and proxy.lower().startswith("https://"):
+            # urllib ne parle pas TLS au proxy lui-même : passer par le proxy local
+            proxy = self.izi.local_proxy_url()
         if proxy:
             parts = urlsplit(strip_credentials(proxy))
             auth = basic_proxy_authorization(proxy)

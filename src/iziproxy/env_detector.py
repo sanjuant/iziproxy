@@ -38,7 +38,7 @@ class EnvironmentDetector:
     Détecte l'environnement courant.
 
     Méthodes (configuration « environment_detection.method ») :
-    - env_var : variables IZIPROXY_ENV, APP_ENV, ENVIRONMENT...
+    - env_var : variable IZIPROXY_ENV
     - hostname : motifs et expressions régulières sur le nom d'hôte
     - ip : plages d'adresses IP
     - ask : question posée à l'utilisateur
@@ -46,9 +46,7 @@ class EnvironmentDetector:
     """
 
     ENV_TYPES = ["local", "dev", "prod"]
-    # IZIPROXY_ENV est prioritaire ; ENV seul est ignoré (utilisé par sh pour un fichier)
-    ENV_VAR_NAMES = ["IZIPROXY_ENV", "PROXY_ENV", "APP_ENV", "ENVIRONMENT", "ENVIRONMENT_TYPE",
-                     "DEPLOY_ENV", "STAGE"]
+    ENV_VAR_NAME = "IZIPROXY_ENV"
 
     def __init__(self, config=None):
         """
@@ -117,18 +115,14 @@ class EnvironmentDetector:
         return str(method).lower()
 
     def _detect_by_env_var(self):
-        """Lit le type d'environnement dans les variables d'environnement."""
-        names = list(self.ENV_VAR_NAMES)
-        custom = self._detection_config.get("env_var_name")
-        if custom:
-            names.insert(0, custom)
-        for name in names:
-            value = os.environ.get(name)
-            env = normalize_environment(value)
-            if env:
-                logger.debug("Environment detected from %s=%s", name, value)
-                return env
-        return None
+        """Lit le type d'environnement dans IZIPROXY_ENV."""
+        value = os.environ.get(self.ENV_VAR_NAME)
+        env = normalize_environment(value)
+        if value and not env:
+            logger.warning("Unknown %s value: %r (expected local, dev or prod)", self.ENV_VAR_NAME, value)
+        elif env:
+            logger.debug("Environment detected from %s=%s", self.ENV_VAR_NAME, value)
+        return env
 
     def _detect_by_hostname(self):
         """Compare le nom d'hôte aux motifs (sous-chaînes) puis aux regex."""

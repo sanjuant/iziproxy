@@ -18,6 +18,8 @@ import threading
 import anyio
 import httpx
 
+from ..proxy_utils import is_https_proxy
+
 # Options transmises au transport plutôt qu'au client
 TRANSPORT_OPTIONS = ("verify", "cert", "http1", "http2", "limits", "retries",
                      "local_address", "socket_options")
@@ -43,8 +45,12 @@ class _RoutingMixin:
         with self._lock:
             transport = self._transports.get(proxy)
             if transport is None:
+                target = proxy
+                if is_https_proxy(proxy):
+                    # Certificat du proxy vérifié selon verify d'IziProxy
+                    target = httpx.Proxy(proxy, ssl_context=self.izi._proxy_ssl_context())
                 # trust_env ne concerne ici que SSL_CERT_FILE / SSL_CERT_DIR
-                transport = self.transport_class(proxy=proxy, trust_env=True, **self._options)
+                transport = self.transport_class(proxy=target, trust_env=True, **self._options)
                 self._transports[proxy] = transport
             return transport
 

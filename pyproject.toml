@@ -38,6 +38,9 @@ ntlm = [
 pac = [
     "pypac>=0.16.0",
 ]
+truststore = [
+    "truststore>=0.10.0; python_version >= '3.10'",
+]
 httpx = [
     "httpx>=0.26.0",
 ]
@@ -47,10 +50,12 @@ aiohttp = [
 all = [
     "pyspnego>=0.9.0",
     "pypac>=0.16.0",
+    "truststore>=0.10.0; python_version >= '3.10'",
 ]
 dev = [
     "pyspnego>=0.9.0",
     "pypac>=0.16.0",
+    "truststore>=0.10.0; python_version >= '3.10'",
     "httpx>=0.26.0",
     "aiohttp>=3.11.0",
     "websockets>=15.0",

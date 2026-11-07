@@ -24,8 +24,24 @@ La version 0.7 réécrit le cœur de la bibliothèque. Changements visibles :
 * Nouveaux paramètres : ``auth_type``, ``no_proxy``, ``interactive`` ;
   nouvelles méthodes et propriétés : ``get_proxy_url()``, ``environment``,
   ``requires_auth``, ``auth_type``, ``reset_credentials()``.
-* La variable d'environnement ``ENV`` n'est plus lue pour détecter
-  l'environnement.
+* Variables d'environnement réduites au strict nécessaire :
+  ``IZIPROXY_USERNAME`` / ``IZIPROXY_PASSWORD`` / ``IZIPROXY_DOMAIN``
+  remplacent ``IZI_*`` et ``PROXY_*`` ; seule ``IZIPROXY_ENV`` désigne
+  l'environnement (``ENV``, ``APP_ENV``, ``ENVIRONMENT``, ``STAGE``... et
+  l'option ``environment_detection.env_var_name`` ont disparu) ;
+  ``ALL_PROXY`` n'est plus lu.
+* Un PAC en ``https://`` dont le certificat est refusé n'est plus
+  retéléchargé sans vérification : il est ignoré. Option ``verify`` (et clé
+  YAML ``verify``) pour fournir une autorité ; ``iziproxy[truststore]`` pour
+  s'appuyer sur le magasin du système.
+* Les proxys ``https://`` sont joints en TLS partout (NTLM, proxy local,
+  urllib, websockets) et leur certificat suit ``verify`` d'IziProxy.
+* ``environment=`` accepte les alias (``"production"``) et lève
+  ``ValueError`` pour une valeur inconnue.
+* Supprimés : ``NtlmProxyManager`` (utilisez ``IziProxy(auth_type="ntlm")``),
+  le paramètre ``workstation`` de ``NtlmProxyAdapter``,
+  ``get_current_environment()`` (propriété ``environment``) et la lecture
+  de l'ancienne entrée ``username`` du trousseau.
 
 Depuis CNTLM
 ------------
@@ -95,7 +111,7 @@ Créez un fichier ``iziproxy.yml`` dans votre projet ou dans ``~/.config/`` :
        auth_type: "ntlm"
    
 Le mot de passe n'a pas à figurer dans la configuration : sous Windows la
-session courante est utilisée ; ailleurs il est lu depuis ``IZI_PASSWORD``,
+session courante est utilisée ; ailleurs il est lu depuis ``IZIPROXY_PASSWORD``,
 le fichier ``.env`` ou le trousseau, ou demandé une seule fois.
 
 Étape 4 : Adapter votre code

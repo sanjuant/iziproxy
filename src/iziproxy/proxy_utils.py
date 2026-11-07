@@ -5,8 +5,11 @@ manipulation des URLs de proxy et construction des contextes TLS.
 
 import fnmatch
 import ipaddress
+import logging
 import ssl
 from urllib.parse import quote, unquote, urlsplit
+
+logger = logging.getLogger("iziproxy")
 
 # Hôtes toujours joignables sans proxy (boucle locale)
 LOOPBACK_BYPASS = ("localhost", "127.0.0.0/8", "::1")
@@ -227,6 +230,35 @@ def extract_credentials(proxy_url):
     return unquote(username) or None, unquote(password) or None
 
 
+def is_https_proxy(proxy_url):
+    """Indique si l'on parle TLS au proxy lui-même (URL en https://)."""
+    return bool(proxy_url) and normalize_proxy_url(proxy_url).lower().startswith("https://")
+
+
+def wrap_tls(sock, context, server_hostname):
+    """
+    Chiffre une connexion, y compris un tunnel qui passe déjà par une
+    connexion TLS vers un proxy https:// (TLS dans TLS).
+
+    ssl.SSLContext.wrap_socket() ne sait pas empiler deux couches TLS : la
+    seconde utiliserait directement le descripteur réseau. urllib3 fournit
+    SSLTransport, qui chiffre en mémoire au-dessus d'une socket TLS.
+
+    Args:
+        sock (socket.socket): Connexion ouverte (éventuellement déjà TLS)
+        context (ssl.SSLContext): Contexte TLS
+        server_hostname (str): Nom vérifié dans le certificat
+
+    Returns:
+        ssl.SSLSocket|urllib3.util.ssltransport.SSLTransport: Connexion chiffrée
+    """
+    if isinstance(sock, ssl.SSLSocket):
+        from urllib3.util.ssltransport import SSLTransport
+
+        return SSLTransport(sock, context, server_hostname=server_hostname)
+    return context.wrap_socket(sock, server_hostname=server_hostname)
+
+
 def proxy_host_port(proxy_url):
     """
     Retourne (hôte, port) d'une URL de proxy, avec le port par défaut du schéma.
@@ -269,16 +301,41 @@ def split_timeout(timeout):
     return timeout, timeout
 
 
+def _trusted_context():
+    """
+    Contexte qui fait confiance aux autorités du système.
+
+    Avec truststore (pip install iziproxy[truststore]), la vérification est
+    confiée au système lui-même (Windows, macOS, Linux) : autorités
+    d'entreprise déployées par stratégie, trousseau macOS, récupération des
+    certificats intermédiaires manquants. Sinon : magasin lu par OpenSSL
+    (magasin Windows inclus) complété par certifi.
+    """
+    try:
+        import truststore
+    except ImportError:
+        truststore = None
+    if truststore is not None:
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    ctx = ssl.create_default_context()
+    try:
+        from requests.utils import DEFAULT_CA_BUNDLE_PATH, extract_zipped_paths
+
+        ctx.load_verify_locations(cafile=extract_zipped_paths(DEFAULT_CA_BUNDLE_PATH))
+    except Exception:
+        pass
+    return ctx
+
+
 def build_ssl_context(verify=True, cert=None):
     """
-    Construit un contexte TLS équivalent à celui de requests.
-
-    Lorsque verify vaut True, le magasin système ET le bundle certifi de
-    requests sont chargés : les proxys d'entreprise à inspection TLS
-    installent souvent leur CA dans le magasin système.
+    Construit un contexte TLS.
 
     Args:
-        verify (bool|str): True, False ou chemin vers un bundle/répertoire CA
+        verify (bool|str): True (autorités du système, voir _trusted_context),
+            False (aucune vérification) ou chemin vers un fichier / répertoire
+            d'autorités (seules celles-ci sont acceptées, comme dans requests)
         cert (str|tuple): Certificat client (fichier ou (cert, clé))
 
     Returns:
@@ -286,22 +343,17 @@ def build_ssl_context(verify=True, cert=None):
     """
     import os
 
-    ctx = ssl.create_default_context()
     if verify is False:
+        ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     elif isinstance(verify, str):
-        if os.path.isdir(verify):
-            ctx.load_verify_locations(capath=verify)
-        else:
-            ctx.load_verify_locations(cafile=verify)
+        ctx = ssl.create_default_context(
+            capath=verify if os.path.isdir(verify) else None,
+            cafile=None if os.path.isdir(verify) else verify,
+        )
     else:
-        try:
-            from requests.utils import DEFAULT_CA_BUNDLE_PATH, extract_zipped_paths
-
-            ctx.load_verify_locations(cafile=extract_zipped_paths(DEFAULT_CA_BUNDLE_PATH))
-        except Exception:
-            pass
+        ctx = _trusted_context()
 
     if cert:
         if isinstance(cert, (tuple, list)):
@@ -341,7 +393,7 @@ def parse_proxy_authenticate(headers):
     return result
 
 
-def probe_proxy_auth(proxy_url, timeout=3.0):
+def probe_proxy_auth(proxy_url, timeout=3.0, ssl_context=None):
     """
     Interroge un proxy sans identifiants pour savoir s'il exige une
     authentification et avec quels schémas.
@@ -352,6 +404,8 @@ def probe_proxy_auth(proxy_url, timeout=3.0):
     Args:
         proxy_url (str): URL du proxy
         timeout (float): Délai maximal en secondes
+        ssl_context (ssl.SSLContext): Contexte TLS vers un proxy https://
+            (par défaut : autorités du système)
 
     Returns:
         tuple: (statut HTTP ou None si injoignable, {schéma: jeton})
@@ -367,8 +421,8 @@ def probe_proxy_auth(proxy_url, timeout=3.0):
     except OSError:
         return None, {}
     try:
-        if normalize_proxy_url(proxy_url).startswith("https://"):
-            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+        if is_https_proxy(proxy_url):
+            sock = (ssl_context or build_ssl_context()).wrap_socket(sock, server_hostname=host)
         sock.sendall(
             b"HEAD http://example.com/ HTTP/1.1\r\n"
             b"Host: example.com\r\n"
@@ -378,7 +432,10 @@ def probe_proxy_auth(proxy_url, timeout=3.0):
         response = http.client.HTTPResponse(sock, method="HEAD")
         response.begin()
         return response.status, parse_proxy_authenticate(response.getheaders())
-    except (OSError, http.client.HTTPException, ssl.SSLError):
+    except ssl.SSLError as exc:
+        logger.warning("TLS handshake with proxy %s failed: %s", strip_credentials(proxy_url), exc)
+        return None, {}
+    except (OSError, http.client.HTTPException):
         return None, {}
     finally:
         sock.close()

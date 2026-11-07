@@ -20,6 +20,8 @@ Paramètre          Rôle
 ``auth_type``      ``basic`` ou ``ntlm`` (détecté sinon)
 ``no_proxy``       Exclusions supplémentaires (chaîne ou liste)
 ``interactive``    ``False`` pour ne jamais demander d'identifiants
+``verify``         Certificats du proxy https:// et du PAC : ``True``, ``False``
+                   ou chemin d'autorités (voir plus bas)
 ``debug``          Journaux détaillés sur stderr
 =================  ==============================================================
 
@@ -58,15 +60,15 @@ Formats acceptés (séparés par virgules, points-virgules ou espaces) :
 Détection de l'environnement
 ----------------------------
 
-Méthode ``auto`` : variables d'environnement, puis nom d'hôte, puis IP, puis
+Méthode ``auto`` : variable ``IZIPROXY_ENV``, puis nom d'hôte, puis IP, puis
 ``local``.
 
-Variables lues : ``IZIPROXY_ENV``, ``PROXY_ENV``, ``APP_ENV``,
-``ENVIRONMENT``, ``ENVIRONMENT_TYPE``, ``DEPLOY_ENV``, ``STAGE`` (et
-``env_var_name``). Les valeurs reconnues sont des alias explicites
+``IZIPROXY_ENV`` accepte ``local``, ``dev``, ``prod`` et des alias explicites
 (``production``, ``prd`` → ``prod`` ; ``staging``, ``qa``, ``uat``,
-``recette`` → ``dev``...). La variable ``ENV`` n'est pas lue : les shells
-l'utilisent pour désigner un fichier.
+``recette`` → ``dev``...) ; une valeur inconnue est signalée dans les
+journaux et ignorée. Aucune autre variable (``APP_ENV``, ``ENVIRONMENT``...)
+n'est lue : pour réutiliser la vôtre, passez
+``environment=os.environ["APP_ENV"]``.
 
 Identifiants
 ------------
@@ -75,7 +77,7 @@ Ordre de recherche :
 
 1. ``username`` / ``password`` du constructeur
 2. Identifiants présents dans l'URL du proxy
-3. Variables ``IZI_USERNAME``, ``IZI_PASSWORD``, ``IZI_DOMAIN`` (ou ``PROXY_*``)
+3. Variables ``IZIPROXY_USERNAME``, ``IZIPROXY_PASSWORD``, ``IZIPROXY_DOMAIN``
 4. Fichier ``.env`` (``./.env``, ``~/.config/.env``, ``~/.env``)
 5. Trousseau système (service ``iziproxy_<env>-<auth_type>``)
 6. NTLM sous Windows : session courante (aucune saisie)
@@ -83,3 +85,49 @@ Ordre de recherche :
    enregistrement dans le trousseau
 
 ``credentials.prompt: false`` ou ``interactive=False`` désactive l'étape 7.
+
+Variables d'environnement
+-------------------------
+
+IziProxy ne lit que ces variables :
+
+.. list-table::
+   :header-rows: 1
+
+   * - Variable
+     - Rôle
+   * - ``IZIPROXY_USERNAME``, ``IZIPROXY_PASSWORD``, ``IZIPROXY_DOMAIN``
+     - Identifiants du proxy (aussi lus dans un fichier ``.env``)
+   * - ``IZIPROXY_ENV``
+     - Environnement forcé (``local``, ``dev``, ``prod`` ou un alias)
+   * - ``HTTP_PROXY``, ``HTTPS_PROXY``, ``NO_PROXY`` (ou en minuscules)
+     - Proxy déclaré par le système (désactivable : ``system_proxy.detect_env_vars: false``)
+
+``ALL_PROXY`` n'est pas lu. ``install()`` et ``set_environment_variables()``
+écrivent ``HTTP_PROXY``, ``HTTPS_PROXY`` et ``NO_PROXY`` en majuscules et en
+minuscules (curl ne lit que les minuscules) et les restaurent à la fin ;
+``refresh()`` relit les valeurs d'origine, pas celles qu'IziProxy a écrites.
+
+Certificats : proxy https:// et fichier PAC
+-------------------------------------------
+
+Un proxy déclaré en ``https://`` est joint en TLS, y compris par
+l'adaptateur NTLM et le proxy local ; une cible HTTPS est alors chiffrée une
+seconde fois dans le tunnel. Un fichier PAC servi en ``https://`` est
+téléchargé en vérifiant son certificat.
+
+Le paramètre ``verify`` (ou la clé ``verify`` du YAML) règle ces deux
+vérifications :
+
+* ``True`` (défaut) : autorités du système. Avec
+  ``pip install iziproxy[truststore]``, la vérification est confiée au
+  système lui-même (autorités d'entreprise déployées par stratégie,
+  trousseau macOS, certificats intermédiaires manquants) ; sinon, magasin lu
+  par OpenSSL complété par certifi.
+* ``"/chemin/ca.pem"`` (fichier ou répertoire) : seules ces autorités.
+* ``False`` : aucune vérification (déconseillé).
+
+Il n'y a aucun repli silencieux : un PAC dont le certificat est refusé est
+ignoré (avertissement dans les journaux), un proxy refusé fait échouer la
+requête. Les certificats des sites restent vérifiés par chaque client
+(``verify`` de requests, de httpx...).

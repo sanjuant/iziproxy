@@ -11,7 +11,7 @@ import subprocess
 import urllib.request
 from urllib.parse import urlsplit
 
-from .proxy_utils import normalize_proxy_url, parse_no_proxy
+from .proxy_utils import build_ssl_context, normalize_proxy_url, parse_no_proxy
 
 logger = logging.getLogger("iziproxy")
 
@@ -67,23 +67,29 @@ class ProxyDetector:
     Détecte les paramètres de proxy du système.
 
     Sources, par ordre de priorité :
-    1. Variables d'environnement (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY)
+    1. Variables d'environnement (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
     2. Paramètres du système (registre Windows, scutil macOS, GNOME/KDE)
     3. Fichier PAC déclaré par le système (évalué pour chaque URL)
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, verify=True):
         """
         Args:
             config (dict, optional): Section « system_proxy » de la configuration
                 - use_system_proxy (bool): active la détection (défaut True)
                 - detect_env_vars (bool): lit les variables d'environnement (défaut True)
                 - detect_pac (bool): utilise les fichiers PAC (défaut True)
+            verify (bool|str): Vérification du certificat d'un PAC en https://
+                (voir proxy_utils.build_ssl_context)
         """
         self.config = config or {}
+        self.verify = verify
         self.use_system_proxy = self.config.get("use_system_proxy", True)
         self.detect_env_vars = self.config.get("detect_env_vars", True)
         self.detect_pac = self.config.get("detect_pac", True)
+        # Valeurs d'origine des variables qu'IziProxy a lui-même remplacées
+        # (set_environment_variables) : {nom: valeur|None}
+        self.env_overrides = {}
         self._settings = None
         self._pac_cache = {}
         self._pac_warning_shown = False
@@ -132,14 +138,26 @@ class ProxyDetector:
         return dict(settings)
 
     def _detect_env_vars(self):
-        """Lit les variables d'environnement standard (minuscules prioritaires)."""
+        """
+        Lit HTTP_PROXY, HTTPS_PROXY et NO_PROXY (minuscules prioritaires).
+
+        Les variables remplacées par l'instance elle-même sont lues à leur
+        valeur d'origine : après install(), relancer la détection ne doit
+        pas renvoyer vers son propre proxy local.
+        """
+        def get(name):
+            if name in self.env_overrides:
+                return self.env_overrides[name]
+            return os.environ.get(name)
+
         def read(name):
-            return os.environ.get(name.lower()) or os.environ.get(name.upper())
+            return get(name.lower()) or get(name.upper())
 
         result = {}
-        all_proxy = read("all_proxy")
-        http = read("http_proxy") or all_proxy
-        https = read("https_proxy") or all_proxy or http
+        http = read("http_proxy")
+        https = read("https_proxy") or http
+        if not (http or https):
+            return result
         if http:
             result["http"] = normalize_proxy_url(http)
         if https:
@@ -351,7 +369,7 @@ class ProxyDetector:
                 self._pac_warning_shown = True
             return None
 
-        text = self.fetch_pac(pac_url)
+        text = self.fetch_pac(pac_url, self.verify)
         if text:
             try:
                 pac = PACFile(text)
@@ -361,9 +379,18 @@ class ProxyDetector:
         return pac
 
     @staticmethod
-    def fetch_pac(pac_url):
+    def fetch_pac(pac_url, verify=True):
         """
         Télécharge le contenu d'un fichier PAC, sans passer par un proxy.
+
+        Le PAC décide de la route de tout le trafic : le certificat d'un PAC
+        en https:// est toujours vérifié selon ``verify``, sans repli
+        silencieux. En cas d'échec, le PAC est ignoré.
+
+        Args:
+            pac_url (str): URL (http, https, file) ou chemin du fichier PAC
+            verify (bool|str): True (autorités du système), False ou chemin
+                vers un fichier / répertoire d'autorités
 
         Returns:
             str|None: Contenu JavaScript du PAC
@@ -372,35 +399,26 @@ class ProxyDetector:
             with open(pac_url, "r", encoding="utf-8", errors="replace") as file:
                 return file.read()
 
-        def open_url(context):
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({}),
-                urllib.request.HTTPSHandler(context=context),
-            )
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=build_ssl_context(verify)),
+        )
+        try:
             with opener.open(pac_url, timeout=5) as response:
                 status = getattr(response, "status", None)
                 if status not in (None, 200):
                     return None
                 return response.read().decode("utf-8", errors="replace")
-
-        try:
-            return open_url(ssl.create_default_context())
         except Exception as exc:
             # urllib enveloppe les erreurs TLS dans URLError.reason
-            if not isinstance(getattr(exc, "reason", exc), ssl.SSLError):
+            if isinstance(getattr(exc, "reason", exc), ssl.SSLError):
+                logger.warning(
+                    "PAC file %s ignored: its certificate could not be verified (%s). Trust its CA "
+                    "(system store, pip install iziproxy[truststore]) or pass verify='/path/to/ca.pem'",
+                    pac_url, exc)
+            else:
                 logger.warning("Cannot download PAC file %s: %s", pac_url, exc)
-                return None
-
-        # Les PAC internes sont souvent servis avec une CA d'entreprise inconnue
-        logger.warning("PAC certificate for %s could not be verified, retrying without verification", pac_url)
-        unverified = ssl.create_default_context()
-        unverified.check_hostname = False
-        unverified.verify_mode = ssl.CERT_NONE
-        try:
-            return open_url(unverified)
-        except Exception as exc:
-            logger.warning("Cannot download PAC file %s: %s", pac_url, exc)
-        return None
+            return None
 
     def clear_cache(self):
         """Vide les caches de détection et de PAC."""

@@ -25,18 +25,11 @@ DEFAULT_CONFIG = {
         "dev": {"proxy_url": None, "requires_auth": None},
         "prod": {"proxy_url": None, "requires_auth": None},
     },
+    # Les motifs par défaut sont dans EnvironmentDetector ; la configuration les complète
     "environment_detection": {
         "method": "auto",
-        "hostname_patterns": {
-            "local": ["local", "laptop", "desktop", "dev-pc"],
-            "dev": ["dev", "staging", "test", "preprod"],
-            "prod": ["prod", "production"],
-        },
-        "hostname_regex": {
-            "local": ["^laptop-\\w+$", "^pc-\\w+$", "^desktop-\\w+$"],
-            "dev": ["^dev\\d*-", "^staging\\d*-", "^test\\d*-"],
-            "prod": ["^prod\\d*-", "^production\\d*-"],
-        },
+        "hostname_patterns": {},
+        "hostname_regex": {},
         "ip_ranges": {},
     },
     "system_proxy": {
@@ -49,16 +42,16 @@ DEFAULT_CONFIG = {
     },
 }
 
-# Variables d'environnement reconnues, par ordre de priorité
+# Variables d'environnement (ou du fichier .env) lues pour les identifiants
 CREDENTIAL_ENV_VARS = {
-    "username": ["IZI_USERNAME", "izi_username", "PROXY_USERNAME", "proxy_username"],
-    "password": ["IZI_PASSWORD", "izi_password", "PROXY_PASSWORD", "proxy_password"],
-    "domain": ["IZI_DOMAIN", "izi_domain", "PROXY_DOMAIN", "proxy_domain"],
+    "username": "IZIPROXY_USERNAME",
+    "password": "IZIPROXY_PASSWORD",
+    "domain": "IZIPROXY_DOMAIN",
 }
 
-# Clé du nom d'utilisateur dans le trousseau
+# Clés du nom d'utilisateur et du domaine dans le trousseau
 USERNAME_KEY = "__username__"
-LEGACY_USERNAME_KEY = "username"
+DOMAIN_KEY = "__domain__"
 
 
 class ConfigManager:
@@ -220,23 +213,20 @@ class ConfigManager:
         """
         dotenv = self._load_dotenv()
         found = {"username": username, "password": password, "domain": domain}
-        for field, names in CREDENTIAL_ENV_VARS.items():
+        for field, name in CREDENTIAL_ENV_VARS.items():
             if found[field]:
                 continue
-            for name in names:
-                value = os.environ.get(name) or dotenv.get(name)
-                if value:
-                    found[field] = value
-                    logger.debug("Proxy %s read from %s", field, name)
-                    break
+            value = os.environ.get(name) or dotenv.get(name)
+            if value:
+                found[field] = value
+                logger.debug("Proxy %s read from %s", field, name)
         return found["username"], found["password"], found["domain"]
 
     @staticmethod
     def _keyring_service(service_name, env_type, auth_type):
         return f"{service_name}_{env_type}-{auth_type}"
 
-    def _get_credentials_from_keyring(self, username, password, domain, keyring_service,
-                                      username_key=USERNAME_KEY, service_name="iziproxy"):
+    def _get_credentials_from_keyring(self, username, password, domain, keyring_service):
         """
         Complète les identifiants depuis le trousseau système.
 
@@ -245,12 +235,11 @@ class ConfigManager:
         """
         try:
             if not username:
-                username = (keyring.get_password(keyring_service, username_key)
-                            or keyring.get_password(service_name, LEGACY_USERNAME_KEY))
+                username = keyring.get_password(keyring_service, USERNAME_KEY)
             if username and not password:
                 password = keyring.get_password(keyring_service, username)
             if not domain:
-                domain = keyring.get_password(keyring_service, "__domain__")
+                domain = keyring.get_password(keyring_service, DOMAIN_KEY)
         except Exception as exc:
             logger.debug("Keyring unavailable: %s", exc)
         return username, password, domain
@@ -263,9 +252,10 @@ class ConfigManager:
             tuple: (username, domain)
         """
         try:
+            # getpass lit déjà LOGNAME, USER, LNAME et USERNAME
             username = getpass.getuser()
         except Exception:
-            username = os.environ.get("USERNAME") or os.environ.get("USER")
+            username = None
 
         domain = None
         if platform.system() == "Windows":
@@ -311,7 +301,6 @@ class ConfigManager:
         return username, password, domain
 
     def _get_credentials_interactively(self, username, password, domain, keyring_service,
-                                       username_key=USERNAME_KEY, service_name="iziproxy",
                                        auth_type="basic"):
         """
         Demande les identifiants (fenêtre graphique ou console) et les
@@ -336,20 +325,18 @@ class ConfigManager:
             return username, password, domain
 
         username, password, domain = result
-        self._store_credentials_in_keyring(username, password, domain, keyring_service,
-                                           username_key, service_name)
+        self._store_credentials_in_keyring(username, password, domain, keyring_service)
         return username, password, domain
 
-    def _store_credentials_in_keyring(self, username, password, domain, keyring_service,
-                                      username_key=USERNAME_KEY, service_name="iziproxy"):
+    def _store_credentials_in_keyring(self, username, password, domain, keyring_service):
         """Enregistre les identifiants dans le trousseau système."""
         if not username or not password:
             return
         try:
             keyring.set_password(keyring_service, username, password)
-            keyring.set_password(keyring_service, username_key, username)
+            keyring.set_password(keyring_service, USERNAME_KEY, username)
             if domain:
-                keyring.set_password(keyring_service, "__domain__", domain)
+                keyring.set_password(keyring_service, DOMAIN_KEY, domain)
             logger.debug("Credentials stored in keyring for %s", username)
         except Exception as exc:
             logger.debug("Cannot store credentials in keyring: %s", exc)
@@ -366,7 +353,7 @@ class ConfigManager:
         service = self._keyring_service(service_name, env_type, auth_type)
         try:
             username = keyring.get_password(service, USERNAME_KEY)
-            for key in filter(None, (username, USERNAME_KEY, "__domain__")):
+            for key in filter(None, (username, USERNAME_KEY, DOMAIN_KEY)):
                 try:
                     keyring.delete_password(service, key)
                 except keyring.errors.PasswordDeleteError:
@@ -413,7 +400,7 @@ class ConfigManager:
             return result(username, password, domain)
 
         username, password, domain = self._get_credentials_from_keyring(
-            username, password, domain, service, USERNAME_KEY, service_name)
+            username, password, domain, service)
         if username and password:
             return result(username, password, domain)
 
@@ -424,6 +411,6 @@ class ConfigManager:
 
         if prompt:
             username, password, domain = self._get_credentials_interactively(
-                username, password, domain, service, USERNAME_KEY, service_name, auth_type)
+                username, password, domain, service, auth_type)
 
         return result(username, password, domain)
