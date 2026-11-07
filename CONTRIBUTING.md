@@ -63,6 +63,46 @@ flake8 src tests
 5. Mettez à jour la documentation si nécessaire
 6. Soumettez votre Pull Request avec une description claire
 
+## Intégration continue
+
+GitHub Actions (`.github/workflows/ci.yml`) lance à chaque push sur
+`master`, à chaque Pull Request et chaque lundi :
+
+- les tests sous Linux et Windows, Python 3.11 à 3.14, avec les dernières
+  versions des dépendances, plus Python 3.11 avec les versions minimales ;
+- flake8 ;
+- la documentation Sphinx en mode strict (`-W`).
+
+## Publier une version
+
+1. Changez `version` dans `pyproject.toml`. C'est le seul endroit à modifier :
+   `iziproxy.__version__` et la documentation lisent la version du paquet.
+2. Décrivez les changements visibles dans `docs/source/migration.rst`.
+3. Commitez sur `master`, puis créez et poussez le tag :
+   ```bash
+   git tag -a v0.7.1 -m "iziproxy 0.7.1"
+   git push origin master v0.7.1
+   ```
+
+Le tag déclenche `.github/workflows/release.yml` :
+1. le workflow vérifie que le tag correspond à la version ;
+2. il relance tous les tests ;
+3. il construit le paquet et le contrôle (`twine check`) ;
+4. il le publie sur PyPI ;
+5. il crée la release GitHub.
+
+Read the Docs reconstruit la documentation de son côté.
+
+La publication passe par Trusted Publishing, donc sans jeton PyPI. Il faut
+l'avoir déclarée une fois sur pypi.org, dans les réglages du projet
+(*Publishing* > *GitHub*) :
+- dépôt : `sanjuant/iziproxy` ;
+- workflow : `release.yml` ;
+- environnement : `pypi`.
+
+Une version publiée sur PyPI ne peut plus être remplacée : un correctif
+demande un nouveau numéro.
+
 ## Conventions de codage
 
 - Code (noms, messages de journal et d'erreur) en anglais ; commentaires et

@@ -1,0 +1,10 @@
+# Met à jour les actions GitHub des workflows.
+# Les dépendances Python ne sont pas concernées : leurs minimums sont choisis
+# à la main (plus ancienne version sans faille connue, voir pyproject.toml),
+# et le CI hebdomadaire teste déjà les dernières versions.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

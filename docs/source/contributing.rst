@@ -98,6 +98,52 @@ Soumettre une Pull Request
 
 7. Créez une Pull Request sur GitHub.
 
+Intégration continue
+--------------------
+
+GitHub Actions (``.github/workflows/ci.yml``) lance à chaque push sur
+``master``, à chaque Pull Request et chaque lundi :
+
+* les tests sous Linux et Windows, Python 3.11 à 3.14, avec les dernières
+  versions des dépendances, plus Python 3.11 avec les versions minimales ;
+* flake8 ;
+* la documentation Sphinx en mode strict (``-W``).
+
+Publier une version
+-------------------
+
+1. Changez ``version`` dans ``pyproject.toml``. C'est le seul endroit à
+   modifier : ``iziproxy.__version__`` et la documentation lisent la version
+   du paquet.
+2. Décrivez les changements visibles dans :doc:`migration`.
+3. Commitez sur ``master``, puis créez et poussez le tag :
+
+.. code-block:: bash
+
+   git tag -a v0.7.1 -m "iziproxy 0.7.1"
+   git push origin master v0.7.1
+
+Le tag déclenche ``.github/workflows/release.yml`` :
+
+#. le workflow vérifie que le tag correspond à la version ;
+#. il relance tous les tests ;
+#. il construit le paquet et le contrôle (``twine check``) ;
+#. il le publie sur PyPI ;
+#. il crée la release GitHub.
+
+Read the Docs reconstruit la documentation de son côté.
+
+La publication passe par Trusted Publishing, donc sans jeton PyPI. Il faut
+l'avoir déclarée une fois sur pypi.org, dans les réglages du projet
+(*Publishing* > *GitHub*) :
+
+* dépôt : ``sanjuant/iziproxy`` ;
+* workflow : ``release.yml`` ;
+* environnement : ``pypi``.
+
+Une version publiée sur PyPI ne peut plus être remplacée : un correctif
+demande un nouveau numéro.
+
 Documentation
 -------------
 
