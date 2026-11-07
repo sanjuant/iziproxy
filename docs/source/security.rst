@@ -13,7 +13,10 @@ Les identifiants ne vont qu'au proxy
    httpx et urllib n'envoient alors ``Proxy-Authorization`` qu'au proxy
    (dans la requête ``CONNECT`` pour HTTPS), jamais au site visité, même
    après une redirection. Avec NTLM, la négociation a lieu sur la connexion
-   au proxy uniquement.
+   au proxy uniquement. L'en-tête ``Proxy-Authorization`` que requests
+   ajoute lors d'une redirection ``http://`` (identifiants de
+   ``HTTP_PROXY``, jeton du proxy local après ``install()``) est retiré :
+   il partirait sinon vers un site joint en direct ou vers un autre proxy.
 
 Pas de mot de passe dans l'environnement
    ``install()`` et ``set_environment_variables(local_proxy=True)`` font

@@ -24,25 +24,24 @@ import ssl
 from urllib.parse import urlsplit
 
 from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import (
     ConnectTimeout,
     ProxyError,
     ReadTimeout,
+    RequestException,
     SSLError,
 )
 from requests.utils import select_proxy
+from urllib3 import HTTPHeaderDict
 from urllib3.response import HTTPResponse
-
-try:  # urllib3 >= 1.26 / 2.x
-    from urllib3._collections import HTTPHeaderDict
-except ImportError:  # pragma: no cover
-    from urllib3.response import HTTPHeaderDict
 
 from .proxy_utils import (
     build_ssl_context,
     is_https_proxy,
     parse_proxy_authenticate,
     proxy_host_port,
+    read_tunnel_response,
     split_timeout,
     strip_credentials,
     wrap_tls,
@@ -95,6 +94,22 @@ class _SocketCloser:
             self.sock.close()
         except OSError:
             pass
+
+
+class _ClosingPool:
+    """
+    « Pool » minimal passé à urllib3 : une connexion rendue (fin de lecture,
+    Response.close()) est fermée, jamais réutilisée. Sans pool, urllib3 ne
+    fermait pas le socket d'une réponse lue en streaming.
+    """
+
+    @staticmethod
+    def _put_conn(connection):
+        connection.close()
+
+    def __str__(self):
+        # Figure dans les messages d'urllib3 (« <pool>: Read timed out. »)
+        return "NTLM proxy connection"
 
 
 class NtlmProxyAdapter(HTTPAdapter):
@@ -310,8 +325,13 @@ class NtlmProxyAdapter(HTTPAdapter):
 
             self._scheme = scheme
             return sock, response
-        except Exception:
+        except Exception as exc:
             sock.close()
+            # Connexion coupée ou réponse illisible : exception requests (les
+            # délais dépassés sont convertis par l'appelant)
+            if isinstance(exc, (OSError, http.client.HTTPException)) and \
+                    not isinstance(exc, (socket.timeout, RequestException)):
+                raise ProxyError(f"Connection to proxy {proxy_host}:{proxy_port} failed: {exc}") from exc
             raise
 
     # ------------------------------------------------------------------ #
@@ -365,6 +385,9 @@ class NtlmProxyAdapter(HTTPAdapter):
     # ------------------------------------------------------------------ #
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         """Envoie la requête, via le proxy NTLM ou directement selon le résolveur."""
+        # L'authentification du proxy est gérée ici : un Proxy-Authorization
+        # ajouté par requests (redirection) partirait vers le site
+        request.headers.pop("Proxy-Authorization", None)
         proxy_url = self._proxy_for(request.url)
         if not proxy_url:
             return super().send(request, stream=stream, timeout=timeout,
@@ -376,12 +399,20 @@ class NtlmProxyAdapter(HTTPAdapter):
         # ``verify`` (requests) concerne le site ; le proxy suit proxy_verify
         proxy_ctx = build_ssl_context(self.proxy_verify) if is_https_proxy(proxy_url) else None
 
-        if parts.scheme == "https":
-            sock, response = self._send_https(request, parts, proxy_url, proxy_ctx,
-                                              connect_timeout, read_timeout, verify, cert)
-        else:
-            sock, response = self._send_http(request, parts, proxy_url, proxy_ctx,
-                                             connect_timeout, read_timeout)
+        try:
+            if parts.scheme == "https":
+                sock, response = self._send_https(request, parts, proxy_url, proxy_ctx,
+                                                  connect_timeout, read_timeout, verify, cert)
+            else:
+                sock, response = self._send_http(request, parts, proxy_url, proxy_ctx,
+                                                 connect_timeout, read_timeout)
+        except RequestException:
+            raise
+        except socket.timeout as exc:
+            raise ReadTimeout(exc, request=request) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # Les appelants de requests n'interceptent que ses propres exceptions
+            raise RequestsConnectionError(exc, request=request) from exc
 
         return self._build(request, sock, response, method, stream)
 
@@ -406,8 +437,9 @@ class NtlmProxyAdapter(HTTPAdapter):
             if auth_header:
                 lines.append(f"Proxy-Authorization: {auth_header}")
             sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
-            # Méthode CONNECT : pas de corps sur 200, http.client lit le corps des 407
-            return self._read_response(sock, "CONNECT")
+            # Méthode CONNECT : pas de corps sur 200, http.client lit le corps des
+            # 407 ; les octets qui suivent un 200 appartiennent au tunnel
+            return read_tunnel_response(sock)
 
         try:
             return self._negotiate(proxy_url, connect_timeout, connect_leg, proxy_ssl_context)
@@ -488,6 +520,7 @@ class NtlmProxyAdapter(HTTPAdapter):
             preload_content=False,
             decode_content=True,
             original_response=response,
+            pool=_ClosingPool(),
             connection=_SocketCloser(sock),
             request_method=method,
             request_url=request.url,

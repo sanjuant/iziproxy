@@ -35,11 +35,11 @@ domestique), la ligne ne change rien : le même code marche partout.
 pip install iziproxy              # proxy sans authentification ou Basic
 pip install "iziproxy[ntlm]"      # + NTLM / Negotiate (pyspnego)
 pip install "iziproxy[pac]"       # + fichiers PAC (pypac)
-pip install "iziproxy[truststore]" # + certificats vérifiés par le système (Python 3.10+)
+pip install "iziproxy[truststore]" # + certificats vérifiés par le système
 pip install "iziproxy[all]"       # les trois
 ```
 
-Python 3.8 ou plus récent. `[httpx]` et `[aiohttp]` installent ces clients
+Python 3.10 ou plus récent. `[httpx]` et `[aiohttp]` installent ces clients
 pour leurs adaptateurs dédiés.
 
 ## Démarrage

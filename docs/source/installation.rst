@@ -1,14 +1,14 @@
 Installation
 ============
 
-IziProxy nécessite Python 3.8 ou plus récent.
+IziProxy nécessite Python 3.10 ou plus récent.
 
 .. code-block:: bash
 
    pip install iziproxy               # proxy sans authentification ou Basic
    pip install "iziproxy[ntlm]"       # + NTLM / Negotiate (pyspnego)
    pip install "iziproxy[pac]"        # + fichiers PAC (pypac)
-   pip install "iziproxy[truststore]" # + certificats vérifiés par le système (Python 3.10+)
+   pip install "iziproxy[truststore]" # + certificats vérifiés par le système
    pip install "iziproxy[all]"        # les trois
 
 Les options ``httpx`` et ``aiohttp`` installent ces clients pour leurs

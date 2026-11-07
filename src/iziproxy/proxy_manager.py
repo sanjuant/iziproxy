@@ -5,6 +5,7 @@ authentification et intégration avec requests.
 
 import os
 import threading
+import time
 from urllib.parse import urlsplit
 
 import requests
@@ -41,9 +42,34 @@ DEFAULT_TARGET_URL = "https://www.example.com/"
 
 _PROXY_ENV_VARS = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")
 
+# Délai avant de sonder de nouveau un proxy resté sans réponse (secondes)
+AUTH_PROBE_RETRY_DELAY = 10.0
+
+# Valeurs reconnues pour auth_type ; Negotiate passe par l'adaptateur NTLM,
+# qui choisit NTLM ou Negotiate selon les schémas proposés par le proxy
+_AUTH_TYPES = {"basic": "basic", "ntlm": "ntlm", "negotiate": "ntlm"}
+
 # Patch de requests actif (un seul à la fois pour tout le processus)
 _PATCH_LOCK = threading.Lock()
 _ACTIVE_PATCH = {"owner": None, "original_init": None}
+
+
+def _normalize_auth_type(value):
+    """
+    Valide un type d'authentification ('basic', 'ntlm', 'negotiate').
+
+    Returns:
+        str|None: 'basic', 'ntlm' ou None (détection automatique)
+
+    Raises:
+        ValueError: Type inconnu (autrefois traité en silence comme Basic)
+    """
+    if value is None or str(value).strip() == "":
+        return None
+    normalized = _AUTH_TYPES.get(str(value).strip().lower())
+    if normalized is None:
+        raise ValueError(f"Unknown auth_type {value!r}: expected basic, ntlm or negotiate")
+    return normalized
 
 
 class IziProxy:
@@ -77,7 +103,9 @@ class IziProxy:
             username (str): Nom d'utilisateur du proxy
             password (str): Mot de passe du proxy
             domain (str): Domaine NTLM
-            auth_type (str): 'basic' ou 'ntlm' (détecté automatiquement sinon)
+            auth_type (str): 'basic', 'ntlm' ou 'negotiate' (équivalent de
+                'ntlm' : le schéma est choisi parmi ceux du proxy) ; détecté
+                automatiquement sinon. ValueError pour une autre valeur
             no_proxy (str|list): Hôtes supplémentaires à contacter sans proxy
             interactive (bool): Autoriser la saisie des identifiants manquants
                 (None : valeur de la configuration, vrai par défaut)
@@ -106,7 +134,7 @@ class IziProxy:
         self.username_override = username
         self.password_override = password
         self.domain_override = domain
-        self.auth_type_override = auth_type.lower() if auth_type else None
+        self.auth_type_override = _normalize_auth_type(auth_type)
         self.no_proxy_override = no_proxy
         self.auth_proxies_override = auth_proxies
         self.interactive = interactive
@@ -122,6 +150,8 @@ class IziProxy:
         self._lock = threading.RLock()
         self._settings = None
         self._auth = None
+        # (proxy, instant) de la dernière sonde restée sans réponse
+        self._probe_failure = None
         self._credentials = None
         # Incrémenté à chaque oubli des identifiants : les adaptateurs NTLM
         # créés avant (sessions, proxys locaux) sont alors recréés
@@ -347,6 +377,9 @@ class IziProxy:
         Le proxy sondé est celui de ``url`` (https://www.example.com par
         défaut) ; tant qu'aucune URL n'a désigné de proxy (PAC qui répond
         DIRECT pour la cible par défaut), la décision n'est pas mémorisée.
+        Un proxy qui ne répond pas à la sonde (VPN pas encore établi, délai
+        dépassé) donne une décision provisoire, non mémorisée : il est sondé
+        de nouveau après AUTH_PROBE_RETRY_DELAY secondes.
 
         Returns:
             dict: {'required': bool, 'type': 'basic'|'ntlm'}
@@ -357,7 +390,7 @@ class IziProxy:
 
             env_config = self._env_config()
             required = env_config.get("requires_auth")
-            auth_type = self.auth_type_override or (env_config.get("auth_type") or "").lower() or None
+            auth_type = self.auth_type_override or _normalize_auth_type(env_config.get("auth_type"))
 
             if required is None and (self.username_override or self.password_override):
                 required = True
@@ -375,10 +408,24 @@ class IziProxy:
                 required = True if required is None else required
                 auth_type = auth_type or "basic"
             elif required is None or (required and auth_type is None):
+                provisional = {"required": bool(required), "type": auth_type or "basic"}
+                failure = self._probe_failure
+                if failure and failure[0] == proxy and time.monotonic() - failure[1] < AUTH_PROBE_RETRY_DELAY:
+                    # Sonde récente sans réponse : pas une nouvelle attente à chaque requête
+                    return provisional
                 status, schemes = probe_proxy_auth(
                     proxy, ssl_context=self._proxy_ssl_context() if is_https_proxy(proxy) else None)
                 logger.debug("Proxy probe %s -> status=%s schemes=%s",
                              strip_credentials(proxy), status, list(schemes))
+                if status is None:
+                    # Proxy injoignable : ne pas figer « pas d'authentification »
+                    # pour toute la vie de l'instance
+                    self._probe_failure = (proxy, time.monotonic())
+                    self._warn_once(f"probe:{strip_credentials(proxy)}",
+                                    "Proxy %s did not answer the authentication probe; retrying later",
+                                    strip_credentials(proxy))
+                    return provisional
+                self._probe_failure = None
                 if required is None:
                     required = status == 407
                 if required and auth_type is None:
@@ -436,7 +483,8 @@ class IziProxy:
                 sspi = auth_type == "ntlm" and NTLM_SUPPORT and can_use_current_user()
                 prompt = self.interactive
                 if prompt is None:
-                    prompt = self.config.get("credentials", {}).get("prompt", True)
+                    # « credentials: » vide dans le YAML donne None
+                    prompt = (self.config.get("credentials") or {}).get("prompt", True)
                 username, password, domain = self.config_manager.get_credentials(
                     self.current_env,
                     auth_required=True,
@@ -1009,6 +1057,7 @@ class IziProxy:
         """Oublie le type d'authentification détecté et les identifiants."""
         with self._lock:
             self._auth = None
+            self._probe_failure = None
             self._credentials = None
             self._auth_generation += 1
 

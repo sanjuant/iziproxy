@@ -151,8 +151,9 @@ class ConfigManager:
         un PAC ou désactive la vérification TLS, tout le trafic (et
         l'authentification NTLM / Basic) partirait vers ce proxy.
         """
-        if self.config_path:
-            # Fichier désigné explicitement par l'application
+        if self.config_path and Path(path) == Path(self.config_path).expanduser():
+            # Fichier désigné explicitement par l'application (un config_path
+            # introuvable, lui, se rabat sur les emplacements standards)
             return
         try:
             in_cwd = Path(path).resolve().parent == Path.cwd().resolve()
@@ -173,8 +174,10 @@ class ConfigManager:
         found = set()
         if "verify" in loaded:
             found.add("verify")
-        sources = [loaded] + [env for env in (loaded.get("environments") or {}).values()
-                              if isinstance(env, dict)]
+        environments = loaded.get("environments")
+        if not isinstance(environments, dict):
+            environments = {}
+        sources = [loaded] + [env for env in environments.values() if isinstance(env, dict)]
         for source in sources:
             found.update(key for key in ("proxy_url", "pac_url", "auth_proxies") if source.get(key))
         return found
@@ -203,8 +206,9 @@ class ConfigManager:
         Returns:
             dict: Configuration ({} si inconnu)
         """
-        envs = self.config.get("environments") or {}
-        return envs.get(env_type) or {}
+        envs = self.config.get("environments")
+        env = envs.get(env_type) if isinstance(envs, dict) else None
+        return env if isinstance(env, dict) else {}
 
     # ------------------------------------------------------------------ #
     # Sources d'identifiants

@@ -4,6 +4,8 @@ manipulation des URLs de proxy et construction des contextes TLS.
 """
 
 import fnmatch
+import http.client
+import io
 import ipaddress
 import logging
 import ssl
@@ -16,6 +18,9 @@ LOOPBACK_BYPASS = ("localhost", "127.0.0.0/8", "::1")
 
 # Ports par défaut des schémas d'URL cibles
 DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+# Taille maximale de l'en-tête d'une réponse à un CONNECT (lu octet par octet)
+MAX_TUNNEL_HEAD = 65536
 
 
 def _netloc_bounds(url):
@@ -279,6 +284,68 @@ def wrap_tls(sock, context, server_hostname):
     return context.wrap_socket(sock, server_hostname=server_hostname)
 
 
+class _ReplayReader(io.RawIOBase):
+    """Flux brut qui rend d'abord des octets déjà lus, puis lit le socket."""
+
+    def __init__(self, head, sock):
+        super().__init__()
+        self._head = head
+        self._sock = sock
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        if self._head:
+            size = min(len(buffer), len(self._head))
+            buffer[:size] = self._head[:size]
+            self._head = self._head[size:]
+            return size
+        return self._sock.recv_into(buffer)
+
+
+class _ReplaySocket:
+    """Pseudo-socket donné à http.client (seul makefile() est utilisé)."""
+
+    def __init__(self, head, sock):
+        self._raw = _ReplayReader(head, sock)
+
+    def makefile(self, *args, **kwargs):
+        return io.BufferedReader(self._raw)
+
+
+def read_tunnel_response(sock, method="CONNECT"):
+    """
+    Lit la réponse d'un proxy à un CONNECT sans consommer les octets qui
+    suivent son en-tête.
+
+    http.client lit le socket par blocs : les premiers octets d'un serveur
+    qui parle en premier (bannière SSH, SMTP...), arrivés avec la réponse
+    200, resteraient dans son tampon et seraient perdus pour le tunnel.
+    L'en-tête est donc lu octet par octet ; le corps d'un refus (407...)
+    reste lu normalement par http.client.
+
+    Args:
+        sock (socket.socket): Connexion au proxy (éventuellement TLS)
+        method (str): Méthode de la requête envoyée
+
+    Returns:
+        http.client.HTTPResponse: Réponse dont l'en-tête est lu
+    """
+    head = bytearray()
+    while not (head.endswith(b"\n\n") or head.endswith(b"\n\r\n")):
+        if len(head) >= MAX_TUNNEL_HEAD:
+            raise http.client.LineTooLong("proxy response header")
+        byte = sock.recv(1)
+        if not byte:
+            # Connexion fermée : http.client signale l'en-tête incomplet
+            break
+        head += byte
+    response = http.client.HTTPResponse(_ReplaySocket(bytes(head), sock), method=method)
+    response.begin()
+    return response
+
+
 def proxy_host_port(proxy_url):
     """
     Retourne (hôte, port) d'une URL de proxy, avec le port par défaut du schéma.
@@ -430,7 +497,6 @@ def probe_proxy_auth(proxy_url, timeout=3.0, ssl_context=None):
     Returns:
         tuple: (statut HTTP ou None si injoignable, {schéma: jeton})
     """
-    import http.client
     import socket
 
     host, port = proxy_host_port(proxy_url)

@@ -74,7 +74,18 @@ class IziProxyAdapter(HTTPAdapter):
         return super().proxy_manager_for(proxy, **proxy_kwargs)
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
-        """Envoie la requête avec le proxy déterminé pour son URL."""
+        """
+        Envoie la requête avec le proxy déterminé pour son URL.
+
+        Les ``proxies`` de requests (paramètre, Session.proxies, variables
+        d'environnement) sont ignorés : la route vient d'IziProxy.
+        """
+        # Lors d'une redirection http://, requests recopie les identifiants de
+        # SES proxys (HTTP_PROXY, jeton du proxy local après install()) dans un
+        # en-tête Proxy-Authorization. IziProxy authentifie lui-même le proxy de
+        # la route : cet en-tête partirait sinon vers un site joint en direct ou
+        # vers un autre proxy
+        request.headers.pop("Proxy-Authorization", None)
         proxy, mode = self.izi._route(request.url)
         if mode == "ntlm":
             return self._ntlm().send(request, stream=stream, timeout=timeout,

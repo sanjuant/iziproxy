@@ -17,7 +17,7 @@ Paramètre          Rôle
 ``username``       Utilisateur du proxy
 ``password``       Mot de passe du proxy
 ``domain``         Domaine NTLM
-``auth_type``      ``basic`` ou ``ntlm`` (détecté sinon)
+``auth_type``      ``basic``, ``ntlm`` ou ``negotiate`` (détecté sinon)
 ``no_proxy``       Exclusions supplémentaires (chaîne ou liste)
 ``interactive``    ``False`` pour ne jamais demander d'identifiants
 ``verify``         Certificats du proxy https:// et du PAC : ``True``, ``False``
@@ -42,7 +42,9 @@ Clés par environnement :
 * ``proxy_url`` : proxy explicite
 * ``pac_url`` : fichier PAC
 * ``requires_auth`` : ``true``, ``false`` ou absent (détection par sondage)
-* ``auth_type`` : ``basic`` ou ``ntlm`` (absent : choisi d'après ``Proxy-Authenticate``)
+* ``auth_type`` : ``basic``, ``ntlm`` ou ``negotiate`` (équivalent de ``ntlm`` :
+  le schéma est choisi parmi ceux du proxy) ; absent : choisi d'après
+  ``Proxy-Authenticate``. Toute autre valeur lève ``ValueError``
 * ``no_proxy`` : exclusions propres à l'environnement
 * ``auth_proxies`` : proxys autorisés à recevoir les identifiants (aussi
   accepté à la racine du fichier, pour tous les environnements)

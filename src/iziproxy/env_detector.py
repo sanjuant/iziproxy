@@ -173,7 +173,7 @@ class EnvironmentDetector:
         if not ip:
             return None
         for env_type, ranges in self._get_ip_ranges().items():
-            for ip_range in ranges or []:
+            for ip_range in ranges:
                 if self._ip_in_range(ip, ip_range):
                     logger.debug("Environment detected from IP %s in %s", ip, ip_range)
                     return env_type
@@ -192,12 +192,25 @@ class EnvironmentDetector:
         return {"1": "local", "2": "dev", "3": "prod"}.get(choice) or normalize_environment(choice)
 
     def _configured(self, key):
-        """Règles de la configuration ({env: [valeurs]}) pour les types connus."""
-        configured = self._detection_config.get(key) or {}
-        return {env: list(configured.get(env) or []) for env in self.ENV_TYPES if configured.get(env)}
+        """
+        Règles de la configuration ({env: [valeurs]}) pour les types connus.
+
+        Une règle seule peut s'écrire sans liste (``prod: srv-prod``) : elle
+        n'est pas découpée caractère par caractère.
+        """
+        configured = self._detection_config.get(key)
+        if not isinstance(configured, dict):
+            return {}
+        rules = {}
+        for env in self.ENV_TYPES:
+            value = configured.get(env)
+            if not value:
+                continue
+            rules[env] = list(value) if isinstance(value, (list, tuple, set)) else [value]
+        return rules
 
     def _get_ip_ranges(self):
-        return self._detection_config.get("ip_ranges") or {}
+        return self._configured("ip_ranges")
 
     @staticmethod
     def _ip_in_range(ip, ip_range):

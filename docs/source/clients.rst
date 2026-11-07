@@ -58,8 +58,8 @@ certificat du site à travers le tunnel ``CONNECT``.
 
 .. code-block:: bash
 
-   pip install iziproxy[httpx]     # httpx >= 0.26
-   pip install iziproxy[aiohttp]   # aiohttp >= 3.11
+   pip install iziproxy[httpx]     # httpx >= 0.28
+   pip install iziproxy[aiohttp]   # aiohttp >= 3.14
 
 httpx
 -----

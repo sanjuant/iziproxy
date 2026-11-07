@@ -39,7 +39,13 @@ import threading
 from urllib.parse import urlsplit
 
 from .ntlm_auth import NtlmProxyAdapter
-from .proxy_utils import basic_proxy_authorization, is_https_proxy, proxy_host_port, strip_credentials
+from .proxy_utils import (
+    basic_proxy_authorization,
+    is_https_proxy,
+    proxy_host_port,
+    read_tunnel_response,
+    strip_credentials,
+)
 
 logger = logging.getLogger("iziproxy")
 
@@ -72,6 +78,12 @@ MAX_CONNECTIONS = 256
 # Caractères de contrôle interdits dans la ligne de requête et les en-têtes :
 # un « \r » isolé serait pris pour une fin de ligne par certains proxys amont
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+# Nombres (Content-Length, port) : chiffres ASCII seulement ; str.isdigit()
+# accepte « ² », que int() refuse ensuite
+_DIGITS_RE = re.compile(r"[0-9]+")
+# Hôte d'une cible CONNECT (hors IPv6 entre crochets) : nom DNS ou IPv4. Un
+# « @ » ou un « / » ferait choisir la route d'un autre hôte que celui joint
+_HOST_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class _BadRequest(Exception):
@@ -183,7 +195,7 @@ def _read_body(rfile, headers):
     length = _header(headers, "Content-Length")
     if length:
         # int() accepterait « -1 » ou « +5 » : rfile.read(-1) lirait jusqu'à la fermeture
-        if not length.strip().isdigit():
+        if not _DIGITS_RE.fullmatch(length.strip()):
             raise _BadRequest("Invalid Content-Length")
         if int(length) > MAX_BODY:
             raise _BodyTooLarge()
@@ -196,9 +208,14 @@ def _split_authority(authority):
     if authority.startswith("["):
         host, _, rest = authority[1:].partition("]")
         port = rest[1:] if rest.startswith(":") else ""
+        try:
+            valid_host = ipaddress.ip_address(host).version == 6
+        except ValueError:
+            valid_host = False
     else:
         host, _, port = authority.rpartition(":")
-    if not host or not port.isdigit():
+        valid_host = bool(_HOST_RE.fullmatch(host))
+    if not valid_host or not _DIGITS_RE.fullmatch(port) or not 0 < int(port) < 65536:
         raise _BadRequest(f"Invalid CONNECT target: {authority!r}")
     return host, int(port)
 
@@ -357,8 +374,12 @@ class _Handler(socketserver.StreamRequestHandler):
         parts = urlsplit(target)
         if parts.scheme.lower() != "http" or not parts.hostname:
             raise _BadRequest("Only absolute http:// URLs and CONNECT are supported")
+        try:
+            parts.port  # noqa: B018 - ValueError pour un port invalide
+        except ValueError as exc:
+            raise _BadRequest(f"Invalid port in {target!r}") from exc
         length = (_header(headers, "Content-Length") or "").strip()
-        if length.isdigit() and int(length) > MAX_BODY:
+        if _DIGITS_RE.fullmatch(length) and int(length) > MAX_BODY:
             raise _BodyTooLarge()
         if "100-continue" in (_header(headers, "Expect") or "").lower():
             # Le client attend ce feu vert avant d'envoyer le corps (curl : 1 s sinon)
@@ -625,8 +646,8 @@ class LocalProxy:
             if auth:
                 lines.append(f"Proxy-Authorization: {auth}")
             sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
-            response = http.client.HTTPResponse(sock, method="CONNECT")
-            response.begin()
+            # Les octets qui suivent un 200 (bannière SSH...) restent dans le socket
+            response = read_tunnel_response(sock)
         except Exception:
             sock.close()
             raise

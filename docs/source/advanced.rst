@@ -29,6 +29,11 @@ Avec un PAC, le proxy sondé est celui de la première URL qui en désigne un :
 un PAC qui répond ``DIRECT`` pour ``www.example.com`` ne fige donc pas la
 décision.
 
+Un proxy qui ne répond pas à la sonde (VPN pas encore établi, délai de 3 s
+dépassé) ne fige pas non plus la décision : les requêtes partent sans
+identifiants et le proxy est sondé de nouveau après 10 secondes
+(``iziproxy.proxy_manager.AUTH_PROBE_RETRY_DELAY``).
+
 Authentification Basic
 ----------------------
 
@@ -67,7 +72,9 @@ Proxy local
   direct, le proxy local se connecte à la cible ; via un proxy NTLM, il
   réutilise la négociation de l'adaptateur NTLM (``open_tunnel()``) ; via un
   proxy Basic, il envoie ``CONNECT`` avec ``Proxy-Authorization``. Une fois le
-  tunnel établi, les octets sont relayés sans être lus.
+  tunnel établi, les octets sont relayés sans être lus. La réponse du proxy
+  amont est lue sans déborder sur le tunnel : les protocoles où le serveur
+  parle en premier (SSH sur le port 443, SMTP...) gardent leur bannière.
 * requête HTTP en forme absolue : le corps (``Content-Length`` ou
   ``chunked``) est lu en entier (un corps tronqué ou une longueur invalide
   donnent ``400``), les en-têtes propres au saut (``Connection``,

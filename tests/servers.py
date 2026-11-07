@@ -284,13 +284,26 @@ class ProxyHandler(socketserver.StreamRequestHandler):
                 except OSError:
                     self._respond(502, "Bad Gateway", close=True)
                     return
-                self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                if self.server.coalesce_connect:
+                    # Premiers octets d'un serveur qui parle en premier (SSH...)
+                    # envoyés avec la réponse au CONNECT, comme sur un réseau lent
+                    upstream.settimeout(2)
+                    try:
+                        first = upstream.recv(65536)
+                    except OSError:
+                        first = b""
+                    self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n" + first)
+                else:
+                    self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                 self.wfile.flush()
                 upstream.settimeout(None)
                 t = threading.Thread(target=_pipe, args=(upstream, self.connection), daemon=True)
                 t.start()
-                _pipe(self.connection, upstream)
-                t.join(5)
+                try:
+                    _pipe(self.connection, upstream)
+                    t.join(5)
+                finally:
+                    upstream.close()
                 return
 
             # Requête HTTP en forme absolue : relayer vers 127.0.0.1:port
@@ -340,10 +353,12 @@ class ProxyServer:
         auth: None, 'basic', 'ntlm' ou 'negotiate'
         tls (bool): Proxy https:// (les clients lui parlent en TLS) ; son
             certificat auto-signé est dans ``cert_path``
+        coalesce_connect (bool): Envoyer la réponse à un CONNECT avec les
+            premiers octets de la cible (serveur qui parle en premier)
     """
 
     def __init__(self, auth=None, username="alice", password="S3cret!", domain="CORP",
-                 close_on_challenge_request=False, tls=False):
+                 close_on_challenge_request=False, tls=False, coalesce_connect=False):
         self.server = _ThreadingTCPServer(("127.0.0.1", 0), ProxyHandler)
         self.cert_path = None
         if tls:
@@ -358,6 +373,7 @@ class ProxyServer:
         self.server.log = []
         self.server.denied = 0
         self.server.close_on_challenge_request = close_on_challenge_request
+        self.server.coalesce_connect = coalesce_connect
         self.username, self.password, self.domain = username, password, domain
         self.port = self.server.server_address[1]
         self.url = f"{'https' if tls else 'http'}://127.0.0.1:{self.port}"
