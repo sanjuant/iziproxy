@@ -243,7 +243,13 @@ class ProxyHandler(socketserver.StreamRequestHandler):
             self._deny(offered)
             return False
         if "ctx" not in state:
-            state["ctx"] = spnego.server(protocol="ntlm", options=spnego.NegotiateOptions.use_ntlm)
+            if scheme.lower() == "negotiate":
+                # Sous Linux (sans SSPI), le client Negotiate enveloppe NTLM dans
+                # SPNEGO ; l'accepteur SPNEGO de pyspnego accepte aussi du NTLM brut
+                # (SSPI sans Kerberos)
+                state["ctx"] = spnego.server(protocol="negotiate", options=spnego.NegotiateOptions.use_negotiate)
+            else:
+                state["ctx"] = spnego.server(protocol="ntlm", options=spnego.NegotiateOptions.use_ntlm)
         try:
             out = state["ctx"].step(base64.b64decode(token))
         except Exception:
