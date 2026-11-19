@@ -13,6 +13,9 @@ appel configure, pour tout le processus et ses sous-processus :
 - la vérification TLS par les autorités du système (truststore) : un proxy
   qui inspecte TLS présente l'autorité de l'entreprise, déployée dans le
   magasin du système mais absente de certifi.
+- les variables TLS des sous-processus (autorités du système, révocation
+  « au mieux » pour git sous Windows), pour qu'ils passent un proxy qui
+  inspecte le TLS (voir tls_env).
 
 Sans proxy (poste en production, réseau domestique), install() ne modifie
 rien : le même code fonctionne partout.
@@ -159,7 +162,7 @@ def _extract_truststore():
 
 
 def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_proxy=True,
-            truststore=True, **options):
+            truststore=True, tls_env=True, **options):
     """
     Configure le proxy pour tout le processus, en une ligne.
 
@@ -189,6 +192,11 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
             requests, urllib, httpx, aiohttp... acceptent alors l'autorité
             d'un proxy qui inspecte TLS. Ignoré si ``verify`` vaut False ou
             un fichier d'autorités : ce choix explicite prime.
+        tls_env (bool): Avec env_vars, donner aussi aux sous-processus les
+            autorités du système (REQUESTS_CA_BUNDLE, PIP_CERT, SSL_CERT_FILE,
+            CURL_CA_BUNDLE, NODE_EXTRA_CA_CERTS) et, sous Windows, la
+            vérification de révocation « au mieux » de git ; une variable
+            déjà définie n'est jamais remplacée
         **options: Paramètres d'IziProxy (proxy_url, pac_url, username,
             password, domain, auth_type, no_proxy, auth_proxies, config_path, environment,
             interactive, verify, debug)
@@ -226,7 +234,8 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
                     raise ValueError("Environment variables cannot carry NTLM authentication: "
                                      "use install(local_proxy=True)")
                 installation._env_applied = True
-                installation.environment = proxy.set_environment_variables(local_proxy=local_proxy)
+                installation.environment = proxy.set_environment_variables(
+                    local_proxy=local_proxy, tls_env=tls_env)
                 if local_proxy:
                     installation.local_proxy_url = installation.environment.get("HTTPS_PROXY")
             if requests:

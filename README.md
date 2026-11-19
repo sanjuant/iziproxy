@@ -75,6 +75,11 @@ print(installation)
    s'authentifie à la place des outils : aucun mot de passe dans
    l'environnement, et NTLM ou un PAC fonctionnent même pour curl.
 
+   Les sous-processus reçoivent aussi les **autorités de certification du
+   système** et, sous Windows, git vérifie la révocation « au mieux » :
+   ils passent un proxy qui inspecte le TLS (voir
+   [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)).
+
 Tout est réversible : `iziproxy.uninstall()`, un bloc
 `with iziproxy.install():`, ou simplement la fin du programme.
 
@@ -92,8 +97,9 @@ Ajoutez seulement ce qui manque :
 | « Credentials withheld » : PAC en `http://` et proxy authentifié | `install(auth_proxies=["*.proxy.corp.com"])` (voir [Sécurité](docs/source/security.rst)) |
 | Réglages différents en local / dev / prod | fichier `iziproxy.yml` ([Configuration](#configuration)) |
 | `CERTIFICATE_VERIFY_FAILED` (proxy qui inspecte TLS, proxy `https://`, PAC) | Rien à faire : `install()` injecte truststore (magasin du système). Autorité absente du magasin : `install(verify="/chemin/ca-entreprise.pem")` ; désactiver l'injection : `install(truststore=False)` |
-| curl / git sous Windows : `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Le proxy d'entreprise inspecte le TLS et Windows ne joint pas la liste de révocation de son autorité. curl : `--ssl-revoke-best-effort` ; git : `git config --global http.schannelCheckRevoke best-effort` (voir [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)) |
+| curl / git sous Windows : `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Le proxy d'entreprise inspecte le TLS et Windows ne joint pas la liste de révocation de son autorité. git : réglé par `install()` ; curl : `--ssl-revoke-best-effort` (voir [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)) |
 | Ne configurer que certains clients | `install(urllib=False, env_vars=False)` |
+| Garder vos propres variables TLS des sous-processus | `install(tls_env=False)` (celles déjà définies ne sont de toute façon jamais remplacées) |
 | Comprendre ce qui se passe | `install(debug=True)` (journaux sur stderr, mots de passe masqués) |
 
 `install()` accepte tous les paramètres de `IziProxy(...)`.
@@ -195,13 +201,35 @@ pas d'ALPN à négocier. Si `HTTP/1.1 200 Connection established` suit, le
 proxy local et le proxy d'entreprise ont fait leur travail ; une erreur
 après cette ligne vient de la connexion TLS entre l'outil et le site.
 
-**Proxy d'entreprise qui inspecte le TLS (Windows).** Le proxy présente
-alors des certificats signés par l'autorité interne. curl et git (moteur
-schannel) vérifient leur révocation et échouent avec
-`CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` si la liste de révocation est
-injoignable. IziProxy n'y est pour rien (cntlm donnerait la même erreur) ;
-demandez une vérification « au mieux », qui reste active quand la liste
-répond :
+**Proxy d'entreprise qui inspecte le TLS.** Le proxy présente alors des
+certificats signés par l'autorité interne, installée dans le magasin du
+système. Après `iziproxy.install()` (ou `set_environment_variables()`), les
+outils lancés par `subprocess` en tiennent compte **sans rien faire** :
+
+- `REQUESTS_CA_BUNDLE`, `PIP_CERT`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` et
+  `NODE_EXTRA_CA_CERTS` désignent un export PEM des autorités du système
+  (Windows : magasins `ROOT` et `CA` ; macOS : trousseaux système ; plus les
+  autorités de certifi), rafraîchi chaque jour dans le cache de
+  l'utilisateur (`%LOCALAPPDATA%\iziproxy\ca-bundle.pem`,
+  `~/Library/Caches/iziproxy`). Sous Linux, c'est le fichier de la
+  distribution. Avec `verify="/chemin/ca.pem"`, ce fichier est utilisé à la
+  place ; avec `verify=False`, aucune de ces variables n'est définie ;
+- sous Windows, git (moteur schannel) vérifie la révocation et échouerait
+  avec `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` si la liste de révocation
+  de l'autorité interne est injoignable : il reçoit
+  `http.schannelCheckRevoke=best-effort` par `GIT_CONFIG_COUNT` /
+  `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, sans toucher à votre
+  `.gitconfig`. La vérification reste active quand la liste répond.
+
+Une variable que vous avez déjà définie n'est jamais remplacée ;
+`uninstall()` restaure exactement les valeurs d'avant ; `install(tls_env=False)`
+désactive le tout. Si l'export échoue, un avertissement est journalisé et
+le reste de l'installation se fait normalement.
+
+curl (schannel) n'a pas de variable d'environnement pour la révocation :
+ajoutez `--ssl-revoke-best-effort` (ou la ligne `ssl-revoke-best-effort`
+dans votre `_curlrc`). Hors `install()`, par exemple avec un proxy local
+lancé à part, réglez git vous-même :
 
 ```bash
 curl --ssl-revoke-best-effort -x "$HTTPS_PROXY" https://pypi.org/simple/

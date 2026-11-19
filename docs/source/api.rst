@@ -78,6 +78,9 @@ Ces modules ne font pas partie de l'API publique et peuvent évoluer.
 .. automodule:: iziproxy.proxy_utils
    :members:
 
+.. automodule:: iziproxy.tls_env
+   :members: system_ca_bundle, tls_environment, cache_dir
+
 .. automodule:: iziproxy.config_manager
    :members:
 

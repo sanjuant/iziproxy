@@ -132,12 +132,39 @@ vérifie lui-même le certificat du site.
   ``HTTP/1.1 200 Connection established`` suit, le tunnel est ouvert ; une
   erreur après cette ligne vient de la connexion TLS entre l'outil et le
   site.
-* **Proxy qui inspecte le TLS, sous Windows** : curl et git (moteur
-  schannel) vérifient la révocation du certificat signé par l'autorité
-  interne et échouent avec ``CRYPT_E_NO_REVOCATION_CHECK (0x80092012)`` si
-  la liste de révocation est injoignable. Cntlm donnerait la même erreur.
-  Demandez une vérification « au mieux », qui reste active quand la liste
-  répond :
+* **Proxy qui inspecte le TLS** : les sites présentent des certificats
+  signés par l'autorité interne, installée dans le magasin du système. Après
+  ``install()`` ou ``set_environment_variables()``, les sous-processus en
+  tiennent compte sans rien faire :
+
+  - ``REQUESTS_CA_BUNDLE``, ``PIP_CERT``, ``SSL_CERT_FILE``,
+    ``CURL_CA_BUNDLE`` et ``NODE_EXTRA_CA_CERTS`` désignent un export PEM des
+    autorités du système (Windows : magasins ``ROOT`` et ``CA``, certificats
+    valables pour un serveur TLS ; macOS : trousseaux système ; plus les
+    autorités de certifi), rafraîchi chaque jour dans le cache de
+    l'utilisateur. Sous Linux, c'est le fichier de la distribution (sinon
+    celui de certifi). Avec ``verify="/chemin/ca.pem"``, ce fichier est
+    utilisé à la place (un répertoire va dans ``REQUESTS_CA_BUNDLE``,
+    ``PIP_CERT`` et ``SSL_CERT_DIR``) ; avec ``verify=False``, aucune de ces
+    variables n'est définie ;
+  - sous Windows, git (moteur schannel) vérifie la révocation et échouerait
+    avec ``CRYPT_E_NO_REVOCATION_CHECK (0x80092012)`` si la liste de
+    révocation de l'autorité interne est injoignable (cntlm donnerait la
+    même erreur). Il reçoit ``http.schannelCheckRevoke=best-effort`` par
+    ``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_n`` / ``GIT_CONFIG_VALUE_n``,
+    ajoutées à la suite de celles déjà définies, sans toucher au
+    ``.gitconfig`` ; la vérification reste active quand la liste répond.
+
+  Une variable déjà définie n'est jamais remplacée,
+  ``clear_environment_variables()`` et ``uninstall()`` restaurent exactement
+  les valeurs d'avant, ``install(tls_env=False)`` (ou
+  ``set_environment_variables(tls_env=False)``) désactive le tout. Un export
+  impossible est signalé dans les journaux sans faire échouer ``install()``.
+
+* **curl sous Windows** n'a pas de variable d'environnement pour la
+  révocation : ajoutez ``--ssl-revoke-best-effort`` (ou la ligne
+  ``ssl-revoke-best-effort`` dans ``_curlrc``). Avec un proxy local lancé à
+  part, sans ``install()``, réglez aussi git vous-même :
 
   .. code-block:: bash
 
