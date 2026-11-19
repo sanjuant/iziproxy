@@ -1,6 +1,28 @@
 Migration
 =========
 
+Depuis IziProxy 0.7
+-------------------
+
+La version 0.8 vise « définir le proxy et c'est tout », y compris derrière un
+proxy qui inspecte le TLS. Changements visibles :
+
+* ``truststore`` devient une dépendance obligatoire ; l'option
+  ``iziproxy[truststore]`` reste acceptée mais n'installe plus rien de plus.
+* ``install()`` injecte ``truststore`` dans ``ssl`` quand un proxy est
+  actif : Python fait confiance au magasin de certificats du système (dont
+  l'autorité de l'entreprise). Désactivable par ``install(truststore=False)`` ;
+  sans effet avec ``verify=False`` ou un chemin de certificat.
+* ``install()`` / ``set_environment_variables()`` donnent aux sous-processus
+  un bundle des autorités du système (``REQUESTS_CA_BUNDLE``, ``PIP_CERT``,
+  ``SSL_CERT_FILE``, ``CURL_CA_BUNDLE``, ``NODE_EXTRA_CA_CERTS``, sans écraser
+  une valeur déjà définie) et, sous Windows, la vérification de révocation
+  « au mieux » à git. Désactivable par ``tls_env=False``.
+* Nouvelle commande ``iziproxy`` (ou ``python -m iziproxy``) :
+  ``iziproxy serve`` lance le proxy local avec un jeton fixe,
+  ``iziproxy setup`` y raccorde git, curl et pip une fois pour toutes
+  (``iziproxy setup --undo`` restaure les réglages d'avant).
+
 Depuis IziProxy 0.6
 -------------------
 

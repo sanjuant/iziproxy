@@ -120,8 +120,8 @@ Publier une version
 
 .. code-block:: bash
 
-   git tag -a v0.7.1 -m "iziproxy 0.7.1"
-   git push origin master v0.7.1
+   git tag -a v0.8.0 -m "iziproxy 0.8.0"
+   git push origin master v0.8.0
 
 Le tag déclenche ``.github/workflows/release.yml`` :
 
