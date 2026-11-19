@@ -115,6 +115,14 @@ IziProxy ne lit que ces variables :
 minuscules (curl ne lit que les minuscules) et les restaurent à la fin ;
 ``refresh()`` relit les valeurs d'origine, pas celles qu'IziProxy a écrites.
 
+Ils écrivent aussi, pour les sous-processus, les variables TLS absentes :
+``REQUESTS_CA_BUNDLE``, ``PIP_CERT``, ``SSL_CERT_FILE``, ``CURL_CA_BUNDLE``,
+``NODE_EXTRA_CA_CERTS`` (autorités du système, ou le chemin de ``verify``)
+et, sous Windows, ``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_n`` /
+``GIT_CONFIG_VALUE_n`` pour ``http.schannelCheckRevoke=best-effort``. Une
+valeur déjà définie est conservée ; ``tls_env=False`` les désactive (voir
+:doc:`usage`, « Erreurs TLS des outils »).
+
 Certificats : proxy https:// et fichier PAC
 -------------------------------------------
 
@@ -133,6 +141,10 @@ vérifications :
   par OpenSSL complété par certifi.
 * ``"/chemin/ca.pem"`` (fichier ou répertoire) : seules ces autorités.
 * ``False`` : aucune vérification (déconseillé).
+
+``verify`` décide aussi des autorités données aux sous-processus par
+``install()`` : export du magasin du système (``True``), ce chemin, ou
+aucune variable d'autorités (``False``).
 
 Il n'y a aucun repli silencieux : un PAC dont le certificat est refusé est
 ignoré (avertissement dans les journaux), un proxy refusé fait échouer la

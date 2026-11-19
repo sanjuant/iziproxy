@@ -6,6 +6,7 @@ authentification et intégration avec requests.
 import os
 import threading
 import time
+from collections import ChainMap
 from urllib.parse import urlsplit
 
 import requests
@@ -31,6 +32,7 @@ from .proxy_utils import (
     strip_credentials,
 )
 from .secure_config import SecurePassword, SecureProxyConfig
+from .tls_env import CA_VARS, tls_environment
 from .ntlm_auth import NtlmProxyAdapter, can_use_current_user, is_ntlm_auth_available
 
 logger = get_logger("iziproxy")
@@ -158,6 +160,8 @@ class IziProxy:
         self._auth_generation = 0
         self._pac_results = {}
         self._saved_env = None
+        # Valeurs d'origine des variables TLS remplacées : {nom: valeur|None}
+        self._saved_tls_env = None
         self._env_local_proxy = None
         # Proxys locaux partagés par les adaptateurs : {avec_jeton: LocalProxy}
         self._shared_local_proxies = {}
@@ -915,16 +919,23 @@ class IziProxy:
 
         return playwright_proxy(self)
 
-    def set_environment_variables(self, local_proxy=False):
+    def set_environment_variables(self, local_proxy=False, tls_env=True):
         """
         Définit HTTP(S)_PROXY et NO_PROXY pour les outils qui les lisent
         (pip, git, curl, urllib...). Les valeurs précédentes sont mémorisées
         et restaurées par clear_environment_variables().
 
+        Avec ``tls_env``, les sous-processus reçoivent aussi les autorités du
+        système (REQUESTS_CA_BUNDLE, PIP_CERT, SSL_CERT_FILE, CURL_CA_BUNDLE,
+        NODE_EXTRA_CA_CERTS) et, sous Windows, git vérifie la révocation « au
+        mieux » (voir iziproxy.tls_env). Une variable déjà définie n'est pas
+        remplacée ; avec ``verify=False``, aucune variable d'autorités.
+
         Args:
             local_proxy (bool): Faire pointer les variables vers un proxy
                 local (voir start_local_proxy()) qui gère NTLM, le PAC et les
                 exclusions ; il est arrêté par clear_environment_variables()
+            tls_env (bool): Définir aussi les variables TLS des sous-processus
 
         Returns:
             dict: Variables définies
@@ -949,7 +960,35 @@ class IziProxy:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+        # Sans proxy, rien à configurer pour TLS non plus
+        values.update(self._apply_tls_env(tls_env and bool(values)))
         logger.debug("Proxy environment variables set: %s", sorted(values))
+        return values
+
+    def _apply_tls_env(self, enabled):
+        """
+        Définit (ou, si enabled est faux, restaure) les variables TLS des
+        sous-processus.
+
+        Returns:
+            dict: Variables TLS définies
+        """
+        saved = self._saved_tls_env
+        if saved is None:
+            saved = self._saved_tls_env = {name: os.environ.get(name) for name in CA_VARS + ("GIT_CONFIG_COUNT",)}
+        values = {}
+        if enabled:
+            # Décision prise sur les valeurs d'origine, pas sur celles qu'un
+            # appel précédent a définies
+            values = tls_environment(self.verify, ChainMap(saved, os.environ))
+            for name in values:
+                saved.setdefault(name, os.environ.get(name))
+        for name, original in saved.items():
+            value = values.get(name, original)
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         return values
 
     def _local_proxy_env(self):
@@ -990,6 +1029,12 @@ class IziProxy:
         local, self._env_local_proxy = self._env_local_proxy, None
         if local is not None:
             local.stop()
+        saved_tls, self._saved_tls_env = self._saved_tls_env, None
+        for name, value in (saved_tls or {}).items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         if self._saved_env is None:
             return
         for name, value in self._saved_env.items():

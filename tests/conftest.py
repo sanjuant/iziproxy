@@ -20,6 +20,8 @@ ISOLATED_VARS = [
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "IZIPROXY_USERNAME", "IZIPROXY_PASSWORD", "IZIPROXY_DOMAIN", "IZIPROXY_ENV",
     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "PIP_CERT", "NODE_EXTRA_CA_CERTS",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 ]
 
 
@@ -54,6 +56,10 @@ def isolated(monkeypatch, tmp_path):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # Export des autorités du système (tls_env) dans le dossier du test
+    from iziproxy import tls_env
+
+    monkeypatch.setattr(tls_env, "cache_dir", lambda: str(tmp_path / "cache"))
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
