@@ -9,12 +9,15 @@ forcément traversé le proxy.
 
 import json
 import os
+import ssl
 import subprocess
 import sys
 import urllib.request
 
 import pytest
 import requests
+import truststore
+import urllib3
 
 import iziproxy
 from iziproxy import IziProxy
@@ -227,3 +230,74 @@ def test_direct_environment_variables_refused_with_ntlm(ntlm_proxy):
     # Rien ne reste configuré après l'échec
     assert iziproxy.current() is None
     assert "HTTPS_PROXY" not in os.environ
+
+
+# ---------------------------------------------------------------------- #
+# Autorités du système (truststore)
+# ---------------------------------------------------------------------- #
+ORIGINAL_SSL_CONTEXT = ssl.SSLContext
+
+
+def is_injected():
+    return ssl.SSLContext is truststore.SSLContext
+
+
+def test_install_injects_truststore_and_uninstall_extracts_it(make_proxy):
+    proxy = make_proxy()
+
+    installation = iziproxy.install(proxy_url=proxy.url)
+
+    assert installation.truststore_injected and is_injected()
+    assert "truststore" in installation.describe()
+    # requests (via urllib3) vérifie désormais avec le magasin du système
+    assert isinstance(urllib3.util.ssl_.create_urllib3_context(), truststore.SSLContext)
+
+    iziproxy.uninstall()
+
+    assert ssl.SSLContext is ORIGINAL_SSL_CONTEXT
+    assert not installation.truststore_injected
+    assert not isinstance(urllib3.util.ssl_.create_urllib3_context(), truststore.SSLContext)
+
+
+def test_truststore_opt_out(make_proxy):
+    proxy = make_proxy()
+
+    installation = iziproxy.install(proxy_url=proxy.url, truststore=False)
+
+    assert installation.active and not installation.truststore_injected
+    assert ssl.SSLContext is ORIGINAL_SSL_CONTEXT
+    assert "truststore" not in installation.describe()
+
+
+@pytest.mark.parametrize("verify", ["ca_file", False])
+def test_explicit_verify_disables_truststore(make_proxy, tmp_path, verify):
+    # Un fichier d'autorités ou verify=False est un choix explicite
+    if verify == "ca_file":
+        verify = str(tmp_path / "ca.pem")
+        (tmp_path / "ca.pem").write_text("")
+    proxy = make_proxy()
+
+    installation = iziproxy.install(proxy_url=proxy.url, verify=verify)
+
+    assert installation.active and not installation.truststore_injected
+    assert ssl.SSLContext is ORIGINAL_SSL_CONTEXT
+
+
+def test_truststore_injected_by_the_application_is_kept(make_proxy):
+    proxy = make_proxy()
+    truststore.inject_into_ssl()
+    try:
+        installation = iziproxy.install(proxy_url=proxy.url)
+        assert not installation.truststore_injected
+        iziproxy.uninstall()
+        # iziproxy ne retire pas ce qu'il n'a pas posé
+        assert is_injected()
+    finally:
+        truststore.extract_from_ssl()
+
+
+def test_without_proxy_truststore_is_not_injected():
+    installation = iziproxy.install()
+
+    assert not installation.active and not installation.truststore_injected
+    assert ssl.SSLContext is ORIGINAL_SSL_CONTEXT

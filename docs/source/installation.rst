@@ -8,8 +8,7 @@ IziProxy nécessite Python 3.11 ou plus récent.
    pip install iziproxy               # proxy sans authentification ou Basic
    pip install "iziproxy[ntlm]"       # + NTLM / Negotiate (pyspnego)
    pip install "iziproxy[pac]"        # + fichiers PAC (pypac)
-   pip install "iziproxy[truststore]" # + certificats vérifiés par le système
-   pip install "iziproxy[all]"        # les trois
+   pip install "iziproxy[all]"        # les deux
 
 Les options ``httpx`` et ``aiohttp`` installent ces clients pour leurs
 adaptateurs dédiés (voir :doc:`clients`).
@@ -21,6 +20,11 @@ Dépendances
 * ``PyYAML`` : fichier de configuration
 * ``keyring`` : trousseau système pour les mots de passe
 * ``cryptography`` : mots de passe non stockés en clair en mémoire (voir :doc:`security`)
+* ``truststore`` : certificats vérifiés par le magasin du système (Windows,
+  macOS, Linux), où se trouve l'autorité d'un proxy d'entreprise qui
+  inspecte TLS ; ``iziproxy.install()`` l'injecte dans tout le processus
+  (voir :doc:`configuration`). L'option ``[truststore]`` reste acceptée
+  mais n'ajoute plus rien.
 * ``pyspnego`` (option ``ntlm``) : jetons NTLM / Negotiate, SSPI sous Windows,
   MD4 intégré (compatible OpenSSL 3)
 * ``pypac`` (option ``pac``) : évaluation des fichiers PAC
