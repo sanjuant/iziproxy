@@ -230,6 +230,16 @@ def test_undo_keeps_copy_of_file_edited_after_setup(capsys):
     assert "edited since setup" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_undo_copy_is_private():
+    curlrc = tool_setup.curlrc_path()
+    assert cli.main(["setup", "--yes", "--only", "curl"]) == 0
+    _write(curlrc, _read(curlrc) + "insecure\n")
+    assert cli.main(["setup", "--undo"]) == 0
+    mode = stat.S_IMODE(os.stat(curlrc + tool_setup.UNDO_COPY_SUFFIX).st_mode)
+    assert mode & 0o077 == 0
+
+
 @pytest.mark.parametrize("answer", ["n", "", EOFError])
 def test_setup_aborts_without_confirmation(monkeypatch, capsys, answer):
     def fake_input(prompt):

@@ -447,7 +447,8 @@ def undo(tools=TOOLS, windows=None):
         else:
             current = _read_text(target)
             if kind == "file" and current is not None and current != entry.get("written"):
-                shutil.copyfile(target, target + UNDO_COPY_SUFFIX)
+                # Peut contenir le jeton du proxy local : copie privée (0600)
+                _write_private(target + UNDO_COPY_SUFFIX, current)
                 done.append(f"{target}: edited since setup, copy kept in {target + UNDO_COPY_SUFFIX}")
             if original is None:
                 if current is not None:
