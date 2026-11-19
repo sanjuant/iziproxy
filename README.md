@@ -35,11 +35,13 @@ domestique), la ligne ne change rien : le même code marche partout.
 pip install iziproxy              # proxy sans authentification ou Basic
 pip install "iziproxy[ntlm]"      # + NTLM / Negotiate (pyspnego)
 pip install "iziproxy[pac]"       # + fichiers PAC (pypac)
-pip install "iziproxy[truststore]" # + certificats vérifiés par le système
-pip install "iziproxy[all]"       # les trois
+pip install "iziproxy[all]"       # les deux
 ```
 
-Python 3.11 ou plus récent. `[httpx]` et `[aiohttp]` installent ces clients
+Python 3.11 ou plus récent. `truststore` est toujours installé :
+`install()` fait vérifier les certificats par le magasin du système, où se
+trouve l'autorité d'un proxy d'entreprise qui inspecte TLS (absente de
+certifi). L'option `[truststore]` reste acceptée mais n'ajoute plus rien. `[httpx]` et `[aiohttp]` installent ces clients
 pour leurs adaptateurs dédiés.
 
 ## Démarrage
@@ -89,7 +91,7 @@ Ajoutez seulement ce qui manque :
 | Le type d'authentification est mal détecté | `install(auth_type="ntlm")` ou `"basic"` |
 | « Credentials withheld » : PAC en `http://` et proxy authentifié | `install(auth_proxies=["*.proxy.corp.com"])` (voir [Sécurité](docs/source/security.rst)) |
 | Réglages différents en local / dev / prod | fichier `iziproxy.yml` ([Configuration](#configuration)) |
-| Certificat du proxy `https://` ou du PAC refusé | `pip install "iziproxy[truststore]"`, sinon `install(verify="/chemin/ca-entreprise.pem")` |
+| `CERTIFICATE_VERIFY_FAILED` (proxy qui inspecte TLS, proxy `https://`, PAC) | Rien à faire : `install()` injecte truststore (magasin du système). Autorité absente du magasin : `install(verify="/chemin/ca-entreprise.pem")` ; désactiver l'injection : `install(truststore=False)` |
 | curl / git sous Windows : `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Le proxy d'entreprise inspecte le TLS et Windows ne joint pas la liste de révocation de son autorité. curl : `--ssl-revoke-best-effort` ; git : `git config --global http.schannelCheckRevoke best-effort` (voir [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)) |
 | Ne configurer que certains clients | `install(urllib=False, env_vars=False)` |
 | Comprendre ce qui se passe | `install(debug=True)` (journaux sur stderr, mots de passe masqués) |
@@ -207,8 +209,7 @@ git config --global http.schannelCheckRevoke best-effort
 ```
 
 Python ne vérifie pas la révocation, mais doit faire confiance à l'autorité
-interne : `pip install "iziproxy[truststore]"` (ou un pip récent, qui
-utilise déjà le magasin de certificats du système).
+interne : `install()` s'en charge (truststore, magasin du système).
 
 ## Configuration
 

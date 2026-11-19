@@ -481,7 +481,7 @@ class ProxyDetector:
             if isinstance(getattr(exc, "reason", exc), ssl.SSLError):
                 logger.warning(
                     "PAC file %s ignored: its certificate could not be verified (%s). Trust its CA "
-                    "(system store, pip install iziproxy[truststore]) or pass verify='/path/to/ca.pem'",
+                    "(system store) or pass verify='/path/to/ca.pem'",
                     pac_url, exc)
             else:
                 logger.warning("Cannot download PAC file %s: %s", pac_url, exc)

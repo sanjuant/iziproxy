@@ -145,9 +145,8 @@ vérifie lui-même le certificat du site.
      git config --global http.schannelCheckRevoke best-effort
 
 * **Python** ne vérifie pas la révocation, mais doit faire confiance à
-  l'autorité interne : ``pip install "iziproxy[truststore]"`` (ou un pip
-  récent, qui utilise déjà le magasin de certificats du système), sinon
-  ``verify="/chemin/ca-entreprise.pem"``.
+  l'autorité interne : ``install()`` s'en charge (truststore, magasin du
+  système), sinon ``verify="/chemin/ca-entreprise.pem"``.
 
 Patch global de requests
 ^^^^^^^^^^^^^^^^^^^^^^^^

@@ -34,6 +34,10 @@ dependencies = [
     "keyring>=23.0.0",
     "cryptography>=50.0.0",
     "urllib3>=2.8.0",
+    # Autorités du système (Windows, macOS, Linux) : un proxy d'entreprise
+    # qui inspecte TLS présente une autorité déployée dans le magasin du
+    # système, absente de certifi. install() l'injecte dans ssl.
+    "truststore>=0.10.0",
 ]
 # Python 3.10 n'est plus maintenu depuis octobre 2026
 requires-python = ">=3.11"
@@ -49,9 +53,8 @@ ntlm = [
 pac = [
     "pypac>=0.18.4",
 ]
-truststore = [
-    "truststore>=0.10.0",
-]
+# Conservé pour la compatibilité : truststore est désormais obligatoire
+truststore = []
 httpx = [
     "httpx>=0.26.0",
 ]

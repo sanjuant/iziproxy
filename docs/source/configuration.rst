@@ -126,11 +126,9 @@ téléchargé en vérifiant son certificat.
 Le paramètre ``verify`` (ou la clé ``verify`` du YAML) règle ces deux
 vérifications :
 
-* ``True`` (défaut) : autorités du système. Avec
-  ``pip install iziproxy[truststore]``, la vérification est confiée au
-  système lui-même (autorités d'entreprise déployées par stratégie,
-  trousseau macOS, certificats intermédiaires manquants) ; sinon, magasin lu
-  par OpenSSL complété par certifi.
+* ``True`` (défaut) : autorités du système. La vérification est confiée au
+  système lui-même par truststore (autorités d'entreprise déployées par
+  stratégie, trousseau macOS, certificats intermédiaires manquants).
 * ``"/chemin/ca.pem"`` (fichier ou répertoire) : seules ces autorités.
 * ``False`` : aucune vérification (déconseillé).
 
@@ -138,3 +136,30 @@ Il n'y a aucun repli silencieux : un PAC dont le certificat est refusé est
 ignoré (avertissement dans les journaux), un proxy refusé fait échouer la
 requête. Les certificats des sites restent vérifiés par chaque client
 (``verify`` de requests, de httpx...).
+
+Certificats des sites : truststore injecté par install()
+--------------------------------------------------------
+
+Un proxy d'entreprise qui inspecte TLS présente, pour chaque site, un
+certificat signé par l'autorité de l'entreprise. Celle-ci est déployée dans
+le magasin du système (Windows, macOS, Linux), pas dans certifi : sans rien
+faire, requests échoue avec ``CERTIFICATE_VERIFY_FAILED``.
+
+``iziproxy.install()`` appelle donc ``truststore.inject_into_ssl()`` quand un
+proxy est trouvé : requests, urllib, httpx, aiohttp... vérifient alors les
+certificats avec le magasin du système, dans tout le processus.
+``uninstall()`` appelle ``truststore.extract_from_ssl()``, seulement si c'est
+IziProxy qui l'avait injecté (une injection faite par l'application est
+laissée en place).
+
+L'injection n'a pas lieu :
+
+* avec ``install(truststore=False)`` ;
+* avec ``verify=False`` ou ``verify="/chemin/ca.pem"`` (paramètre ou clé
+  YAML) : ce choix explicite prime ;
+* sans proxy (``install()`` ne modifie alors rien).
+
+.. code-block:: python
+
+   iziproxy.install()                  # magasin du système
+   iziproxy.install(truststore=False)  # certifi, comme sans IziProxy

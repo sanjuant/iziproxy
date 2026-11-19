@@ -9,7 +9,10 @@ appel configure, pour tout le processus et ses sous-processus :
 - les variables HTTP(S)_PROXY / NO_PROXY, lues par httpx, pip, git, curl,
   conda, gRPC... Elles pointent vers un proxy local sur 127.0.0.1 qui gère
   NTLM, le PAC et les exclusions, si bien qu'aucun mot de passe n'apparaît
-  dans l'environnement.
+  dans l'environnement ;
+- la vérification TLS par les autorités du système (truststore) : un proxy
+  qui inspecte TLS présente l'autorité de l'entreprise, déployée dans le
+  magasin du système mais absente de certifi.
 
 Sans proxy (poste en production, réseau domestique), install() ne modifie
 rien : le même code fonctionne partout.
@@ -19,6 +22,7 @@ Tout est réversible : uninstall(), bloc ``with`` ou fin du programme.
 
 import atexit
 import logging
+import ssl
 import threading
 import urllib.request
 
@@ -44,6 +48,7 @@ class Installation:
     - ``environment`` (dict) : variables d'environnement définies
     - ``requests_patched`` (bool) : requests est configuré
     - ``urllib_patched`` (bool) : urllib.request.urlopen() est configuré
+    - ``truststore_injected`` (bool) : iziproxy a injecté truststore dans ssl
 
     S'utilise aussi comme gestionnaire de contexte :
         >>> with iziproxy.install():
@@ -57,6 +62,7 @@ class Installation:
         self.environment = {}
         self.requests_patched = False
         self.urllib_patched = False
+        self.truststore_injected = False
         self._previous_opener = None
         self._installed = False
         self._env_applied = False
@@ -97,7 +103,8 @@ class Installation:
             parts.append(f"local {strip_credentials(self.local_proxy_url)}")
         patched = [name for name, done in (("requests", self.requests_patched),
                                            ("urllib", self.urllib_patched),
-                                           ("environment", bool(self.environment))) if done]
+                                           ("environment", bool(self.environment)),
+                                           ("truststore", self.truststore_injected)) if done]
         parts.append(", ".join(patched) or "nothing patched")
         return " ; ".join(parts)
 
@@ -120,13 +127,39 @@ class Installation:
                 self.proxy.clear_environment_variables()
                 self.environment = {}
                 self._env_applied = False
+            if self.truststore_injected:
+                _extract_truststore()
+                self.truststore_injected = False
             self.proxy.stop_local_proxies(keep=self._preexisting_local_proxies)
             self.local_proxy_url = None
         logger.info("iziproxy uninstalled")
 
 
+def _inject_truststore():
+    """
+    Injecte truststore dans ssl, urllib3 et requests.
+
+    Returns:
+        bool: True si iziproxy l'a injecté ; False s'il l'était déjà (par
+        l'application) : uninstall() ne doit alors pas le retirer
+    """
+    import truststore as truststore_module
+
+    if ssl.SSLContext is truststore_module.SSLContext:
+        return False
+    truststore_module.inject_into_ssl()
+    return True
+
+
+def _extract_truststore():
+    """Rend à ssl, urllib3 et requests leur contexte TLS d'origine."""
+    import truststore as truststore_module
+
+    truststore_module.extract_from_ssl()
+
+
 def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_proxy=True,
-            **options):
+            truststore=True, **options):
     """
     Configure le proxy pour tout le processus, en une ligne.
 
@@ -136,7 +169,8 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
     Par défaut tout est détecté (environnement, proxy système, PAC, type
     d'authentification, session Windows pour NTLM) et tout est configuré :
     requests, urllib.request et les variables d'environnement (donc httpx,
-    pip, git, curl...). Sans proxy détecté, rien n'est modifié.
+    pip, git, curl...), et les certificats sont vérifiés par le système
+    (truststore). Sans proxy détecté, rien n'est modifié.
 
     Un nouvel appel remplace la configuration précédente.
 
@@ -150,9 +184,14 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
             (recommandé : gère NTLM et le PAC, aucun mot de passe dans
             l'environnement). False : variables vers le proxy d'entreprise,
             identifiants Basic inclus ; impossible avec NTLM.
+        truststore (bool): Faire vérifier les certificats par les autorités
+            du système (truststore.inject_into_ssl()) dans tout le processus :
+            requests, urllib, httpx, aiohttp... acceptent alors l'autorité
+            d'un proxy qui inspecte TLS. Ignoré si ``verify`` vaut False ou
+            un fichier d'autorités : ce choix explicite prime.
         **options: Paramètres d'IziProxy (proxy_url, pac_url, username,
             password, domain, auth_type, no_proxy, auth_proxies, config_path, environment,
-            interactive, debug)
+            interactive, verify, debug)
 
     Returns:
         Installation: Ce qui a été configuré (proxy, describe(), uninstall())
@@ -197,6 +236,10 @@ def install(proxy=None, *, requests=True, urllib=True, env_vars=True, local_prox
                 installation._previous_opener = getattr(urllib_request, "_opener", None)
                 urllib_request.install_opener(proxy.urllib_opener())
                 installation.urllib_patched = True
+            # verify=False ou un fichier d'autorités : choix explicite, le
+            # magasin du système ne s'y substitue pas
+            if truststore and proxy.verify is True:
+                installation.truststore_injected = _inject_truststore()
         except Exception:
             installation.uninstall()
             raise

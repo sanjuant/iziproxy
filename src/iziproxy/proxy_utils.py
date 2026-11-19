@@ -392,11 +392,11 @@ def _trusted_context():
     """
     Contexte qui fait confiance aux autorités du système.
 
-    Avec truststore (pip install iziproxy[truststore]), la vérification est
-    confiée au système lui-même (Windows, macOS, Linux) : autorités
-    d'entreprise déployées par stratégie, trousseau macOS, récupération des
-    certificats intermédiaires manquants. Sinon : magasin lu par OpenSSL
-    (magasin Windows inclus) complété par certifi.
+    La vérification est confiée au système lui-même par truststore
+    (Windows, macOS, Linux) : autorités d'entreprise déployées par
+    stratégie, trousseau macOS, récupération des certificats intermédiaires
+    manquants. Repli si truststore est introuvable (application figée sans
+    lui) : magasin lu par OpenSSL (magasin Windows inclus) complété par certifi.
     """
     try:
         import truststore
