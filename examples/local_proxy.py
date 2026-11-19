@@ -7,6 +7,11 @@ git, curl, un navigateur... n'ont besoin que de son adresse.
 
     python local_proxy.py            # port 3128
     python local_proxy.py 8888       # autre port (0 : port libre au hasard)
+
+Sans script : ``iziproxy serve`` fait la même chose avec un jeton gardé dans
+le répertoire de configuration de l'utilisateur, et ``iziproxy setup``
+configure une fois pour toutes git, curl et pip (``--undo`` pour revenir en
+arrière).
 """
 
 import sys

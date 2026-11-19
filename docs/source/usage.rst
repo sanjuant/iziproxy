@@ -69,25 +69,74 @@ Comme cntlm ou px, IziProxy peut démarrer un proxy HTTP sur ``127.0.0.1``
 qui s'authentifie auprès du proxy d'entreprise à la place de pip, git, curl,
 conda, d'un navigateur... Ces outils n'ont besoin que de son adresse.
 
-Remplacer cntlm en trois lignes
-"""""""""""""""""""""""""""""""
+Remplacer cntlm : ``iziproxy serve`` et ``iziproxy setup``
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Le paquet installe la commande ``iziproxy`` :
+
+.. code-block:: bash
+
+   iziproxy setup     # une seule fois : configure git, curl et pip
+   iziproxy serve     # le proxy local sur 127.0.0.1:3128 (Ctrl+C pour arrêter)
+
+IziProxy ne peut pas modifier l'environnement d'un terminal déjà ouvert :
+``iziproxy setup`` écrit donc l'URL du proxy local
+(``http://iziproxy:<jeton>@127.0.0.1:3128``) dans la configuration
+**utilisateur** de chaque outil, après avoir affiché ce qu'il va écrire et
+demandé confirmation :
+
+* **git** : configuration globale, ``http.proxy`` et ``https.proxy`` ; sous
+  Windows, ``http.schannelCheckRevoke best-effort`` (voir plus bas) ;
+* **curl** : ``proxy`` dans ``%APPDATA%\_curlrc`` (Windows) ou
+  ``~/.curlrc`` ; sous Windows, ``ssl-revoke-best-effort`` ;
+* **pip** : ``proxy`` et ``cert`` dans ``%APPDATA%\pip\pip.ini`` (Windows)
+  ou ``~/.config/pip/pip.conf``. ``cert`` désigne un export PEM des autorités
+  de certifi et du magasin du système (autorité interne d'un proxy qui
+  inspecte le TLS comprise), écrit dans le répertoire de configuration
+  d'IziProxy. Relancez ``iziproxy setup --only pip`` après l'installation
+  d'une nouvelle autorité.
+
+Options de ``iziproxy setup`` :
+
+* ``--yes`` : pas de confirmation (script d'installation) ;
+* ``--only git,curl`` : seulement ces outils ;
+* ``--port 8888`` : port d'un proxy lancé avec ``iziproxy serve --port 8888`` ;
+* ``--undo`` : restaure les valeurs et fichiers d'avant le premier ``setup``
+  (sauvegardés dans ``setup-backup.json``) ; avec ``--only``, seulement ces
+  outils. Un fichier modifié à la main depuis le ``setup`` est d'abord copié
+  en ``<fichier>.iziproxy-undo.bak``.
+
+**Jeton fixe.** Aucun mot de passe n'est écrit : seul le jeton du proxy
+local figure dans ces fichiers. Il est généré au premier ``serve`` ou
+``setup`` et gardé dans ``local-proxy-token``, dans le répertoire de
+configuration d'IziProxy (``%APPDATA%\iziproxy`` sous Windows,
+``~/.config/iziproxy`` sous Linux, ``~/Library/Application Support/iziproxy``
+sous macOS), lisible par vous seul. ``iziproxy serve`` le reprend à chaque
+démarrage : la configuration des outils reste valable. Supprimez ce fichier
+puis relancez ``iziproxy setup`` pour changer de jeton.
+
+``iziproxy serve`` accepte ``--port`` (3128 par défaut, comme cntlm : un
+port déjà pris, cntlm encore lancé par exemple, arrête la commande),
+``--config fichier.yml`` (voir :doc:`configuration`) et ``--debug``. Il
+affiche l'adresse du proxy, jamais le jeton.
+
+Depuis Python, en trois lignes
+""""""""""""""""""""""""""""""
 
 .. code-block:: python
 
    from iziproxy import IziProxy
 
    local = IziProxy().start_local_proxy()   # http://127.0.0.1:3128
-   print("Proxy local :", local.url)
+   print("Proxy local :", local.address)
    local.serve_forever()                    # Ctrl+C pour arrêter
 
 * **Port** : ``3128`` par défaut, comme cntlm. ``start_local_proxy(port=8888)``
   pour un autre port, ``port=0`` pour un port libre choisi par le système
   (lu ensuite dans ``local.port``). Un port déjà pris (cntlm encore lancé,
   seconde instance) lève ``OSError``.
-* **Jeton** : aléatoire à chaque démarrage et inclus dans ``local.url``. Pour
-  configurer les outils une fois pour toutes, fixez-le :
-  ``start_local_proxy(token="un-jeton-long-et-secret")``, puis par exemple
-  ``git config --global http.proxy http://iziproxy:un-jeton-long-et-secret@127.0.0.1:3128``.
+* **Jeton** : aléatoire à chaque démarrage et inclus dans ``local.url``, sauf
+  si vous le fixez : ``start_local_proxy(token="un-jeton-long-et-secret")``.
 * ``serve_forever()`` bloque jusqu'à Ctrl+C (ou ``stop()`` depuis un autre
   thread), puis arrête le proxy. Script complet : :doc:`examples`.
 
@@ -143,6 +192,8 @@ vérifie lui-même le certificat du site.
 
      curl --ssl-revoke-best-effort -x "$HTTPS_PROXY" https://pypi.org/simple/
      git config --global http.schannelCheckRevoke best-effort
+
+  ``iziproxy setup`` règle ces deux options pour vous.
 
 * **Python** ne vérifie pas la révocation, mais doit faire confiance à
   l'autorité interne : ``pip install "iziproxy[truststore]"`` (ou un pip

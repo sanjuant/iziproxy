@@ -50,6 +50,14 @@ puisse pas en profiter :
   jeton, la réponse est ``407`` ;
 * le jeton n'est jamais relayé vers le proxy d'entreprise ni vers les sites.
 
+La commande ``iziproxy serve`` utilise, elle, un **jeton fixe**, généré une
+fois et gardé dans ``local-proxy-token`` (répertoire de configuration de
+l'utilisateur, lisible par lui seul) ; ``iziproxy setup`` l'écrit dans la
+configuration de git, curl et pip, jamais un mot de passe. Ces fichiers sont
+privés au même titre : quiconque les lit peut utiliser le proxy local tant
+qu'il tourne. Supprimez ``local-proxy-token`` puis relancez ``iziproxy
+setup`` pour en changer (voir :doc:`usage`).
+
 Deux cas désactivent cette protection, à choisir en connaissance de cause :
 
 * ``selenium_proxy()`` : Chrome et Firefox pilotés par WebDriver ne savent
