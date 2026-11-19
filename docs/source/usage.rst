@@ -121,6 +121,34 @@ port libre au hasard : ils ne gênent pas un proxy local lancé sur 3128.
 Les proxys locaux encore actifs sont arrêtés en sortie d'un bloc
 ``with proxy:`` ou par ``stop_local_proxies()``.
 
+Erreurs TLS des outils
+""""""""""""""""""""""
+
+Le trafic HTTPS traverse le proxy local sans être déchiffré : chaque outil
+vérifie lui-même le certificat du site.
+
+* **Lire** ``curl -v`` : ``CONNECT: no ALPN negotiated`` n'est pas une
+  erreur (la connexion vers le proxy local est en HTTP clair). Si
+  ``HTTP/1.1 200 Connection established`` suit, le tunnel est ouvert ; une
+  erreur après cette ligne vient de la connexion TLS entre l'outil et le
+  site.
+* **Proxy qui inspecte le TLS, sous Windows** : curl et git (moteur
+  schannel) vérifient la révocation du certificat signé par l'autorité
+  interne et échouent avec ``CRYPT_E_NO_REVOCATION_CHECK (0x80092012)`` si
+  la liste de révocation est injoignable. Cntlm donnerait la même erreur.
+  Demandez une vérification « au mieux », qui reste active quand la liste
+  répond :
+
+  .. code-block:: bash
+
+     curl --ssl-revoke-best-effort -x "$HTTPS_PROXY" https://pypi.org/simple/
+     git config --global http.schannelCheckRevoke best-effort
+
+* **Python** ne vérifie pas la révocation, mais doit faire confiance à
+  l'autorité interne : ``pip install "iziproxy[truststore]"`` (ou un pip
+  récent, qui utilise déjà le magasin de certificats du système), sinon
+  ``verify="/chemin/ca-entreprise.pem"``.
+
 Patch global de requests
 ^^^^^^^^^^^^^^^^^^^^^^^^
 

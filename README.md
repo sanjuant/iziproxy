@@ -90,6 +90,7 @@ Ajoutez seulement ce qui manque :
 | « Credentials withheld » : PAC en `http://` et proxy authentifié | `install(auth_proxies=["*.proxy.corp.com"])` (voir [Sécurité](docs/source/security.rst)) |
 | Réglages différents en local / dev / prod | fichier `iziproxy.yml` ([Configuration](#configuration)) |
 | Certificat du proxy `https://` ou du PAC refusé | `pip install "iziproxy[truststore]"`, sinon `install(verify="/chemin/ca-entreprise.pem")` |
+| curl / git sous Windows : `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Le proxy d'entreprise inspecte le TLS et Windows ne joint pas la liste de révocation de son autorité. curl : `--ssl-revoke-best-effort` ; git : `git config --global http.schannelCheckRevoke best-effort` (voir [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)) |
 | Ne configurer que certains clients | `install(urllib=False, env_vars=False)` |
 | Comprendre ce qui se passe | `install(debug=True)` (journaux sur stderr, mots de passe masqués) |
 
@@ -185,6 +186,29 @@ Le trafic HTTPS traverse le proxy local sans être déchiffré : chaque outil
 vérifie toujours le certificat du site. `iziproxy.install()` démarre lui
 aussi un proxy local, mais sur un port libre au hasard : il ne gêne pas un
 proxy local lancé sur 3128.
+
+**Lire la sortie de `curl -v`.** `CONNECT: no ALPN negotiated` n'est pas
+une erreur : la connexion vers le proxy local est en HTTP clair, il n'y a
+pas d'ALPN à négocier. Si `HTTP/1.1 200 Connection established` suit, le
+proxy local et le proxy d'entreprise ont fait leur travail ; une erreur
+après cette ligne vient de la connexion TLS entre l'outil et le site.
+
+**Proxy d'entreprise qui inspecte le TLS (Windows).** Le proxy présente
+alors des certificats signés par l'autorité interne. curl et git (moteur
+schannel) vérifient leur révocation et échouent avec
+`CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` si la liste de révocation est
+injoignable. IziProxy n'y est pour rien (cntlm donnerait la même erreur) ;
+demandez une vérification « au mieux », qui reste active quand la liste
+répond :
+
+```bash
+curl --ssl-revoke-best-effort -x "$HTTPS_PROXY" https://pypi.org/simple/
+git config --global http.schannelCheckRevoke best-effort
+```
+
+Python ne vérifie pas la révocation, mais doit faire confiance à l'autorité
+interne : `pip install "iziproxy[truststore]"` (ou un pip récent, qui
+utilise déjà le magasin de certificats du système).
 
 ## Configuration
 
