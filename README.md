@@ -24,7 +24,7 @@ domestique), la ligne ne change rien : le même code marche partout.
 - [Démarrage](#démarrage)
 - [Si ça ne marche pas tel quel](#si-ça-ne-marche-pas-tel-quel)
 - [Contrôle fin : la classe IziProxy](#contrôle-fin--la-classe-iziproxy)
-- [Remplacer cntlm : un proxy local en trois lignes](#remplacer-cntlm--un-proxy-local-en-trois-lignes)
+- [Remplacer cntlm](#remplacer-cntlm)
 - [Configuration](#configuration)
 - [Sécurité](#sécurité)
 - [Développement](#développement)
@@ -97,7 +97,7 @@ Ajoutez seulement ce qui manque :
 | « Credentials withheld » : PAC en `http://` et proxy authentifié | `install(auth_proxies=["*.proxy.corp.com"])` (voir [Sécurité](docs/source/security.rst)) |
 | Réglages différents en local / dev / prod | fichier `iziproxy.yml` ([Configuration](#configuration)) |
 | `CERTIFICATE_VERIFY_FAILED` (proxy qui inspecte TLS, proxy `https://`, PAC) | Rien à faire : `install()` injecte truststore (magasin du système). Autorité absente du magasin : `install(verify="/chemin/ca-entreprise.pem")` ; désactiver l'injection : `install(truststore=False)` |
-| curl / git sous Windows : `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Le proxy d'entreprise inspecte le TLS et Windows ne joint pas la liste de révocation de son autorité. git : réglé par `install()` ; curl : `--ssl-revoke-best-effort` (voir [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)) |
+| curl / git sous Windows : `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Le proxy d'entreprise inspecte le TLS et Windows ne joint pas la liste de révocation de son autorité. git : réglé par `install()` ; curl : `--ssl-revoke-best-effort` ; `iziproxy setup` règle les deux pour git et curl (voir [Proxy local](#remplacer-cntlm--un-proxy-local-en-trois-lignes)) |
 | Ne configurer que certains clients | `install(urllib=False, env_vars=False)` |
 | Garder vos propres variables TLS des sous-processus | `install(tls_env=False)` (celles déjà définies ne sont de toute façon jamais remplacées) |
 | Comprendre ce qui se passe | `install(debug=True)` (journaux sur stderr, mots de passe masqués) |
@@ -144,7 +144,7 @@ documentation.
 
 Pour pip, git, curl… lancés **hors** de Python, voir la section suivante.
 
-## Remplacer cntlm : un proxy local en trois lignes
+## Remplacer cntlm
 
 IziProxy peut faire tourner sur votre poste un proxy local, comme cntlm ou
 px : il écoute sur `127.0.0.1:3128`, s'authentifie auprès du proxy
@@ -152,11 +152,55 @@ d'entreprise (NTLM / Negotiate avec la session Windows, Basic) et applique le
 PAC et les exclusions. Les outils n'ont besoin d'aucun identifiant, seulement
 de l'adresse du proxy local.
 
+Deux commandes suffisent :
+
+```bash
+iziproxy setup     # une seule fois : configure git, curl et pip
+iziproxy serve     # à chaque session : le proxy local (Ctrl+C pour arrêter)
+```
+
+`iziproxy setup` affiche ce qu'il va écrire, demande confirmation (`--yes`
+pour s'en passer), puis règle la configuration **utilisateur** de chaque
+outil sur l'URL du proxy local `http://iziproxy:<jeton>@127.0.0.1:3128` :
+
+| Outil | Fichier | Réglages |
+|---|---|---|
+| git | configuration globale (`~/.gitconfig`) | `http.proxy`, `https.proxy` ; sous Windows `http.schannelCheckRevoke best-effort` |
+| curl | `%APPDATA%\_curlrc` (Windows), `~/.curlrc` | `proxy` ; sous Windows `ssl-revoke-best-effort` |
+| pip | `%APPDATA%\pip\pip.ini` (Windows), `~/.config/pip/pip.conf` | `proxy`, `cert` (export PEM du magasin de certificats du système) |
+
+- **Aucun mot de passe écrit** : seul le jeton du proxy local figure dans ces
+  fichiers. Il est généré une fois et gardé dans le répertoire de
+  configuration d'IziProxy (`%APPDATA%\iziproxy\local-proxy-token`,
+  `~/.config/iziproxy/` sous Linux, `~/Library/Application Support/iziproxy/`
+  sous macOS), lisible par vous seul : `iziproxy serve` reprend toujours le
+  même, la configuration des outils reste valable d'un démarrage à l'autre.
+- **Retour arrière** : chaque valeur et chaque fichier modifiés sont
+  sauvegardés avant l'écriture ; `iziproxy setup --undo` les restaure (un
+  fichier retouché à la main depuis est d'abord copié en
+  `<fichier>.iziproxy-undo.bak`). Relancer `setup` ne perd pas la sauvegarde
+  d'origine.
+- **Options** : `--only git,curl` limite les outils ; `--port 8888` pour un
+  proxy lancé avec `iziproxy serve --port 8888` (port 3128 par défaut,
+  celui de cntlm : arrêtez cntlm avant). `iziproxy serve --config
+  iziproxy.yml` lit un fichier de configuration, `--debug` détaille les
+  journaux.
+- **Certificats** : l'export PEM pour pip est figé au moment du `setup` ;
+  relancez `iziproxy setup --only pip` si une nouvelle autorité interne est
+  installée.
+
+Un autre outil (npm, conda, Docker…) se règle à la main avec la même URL :
+le jeton est dans le fichier `local-proxy-token`.
+
+### Depuis Python
+
+Le proxy local se démarre aussi par code :
+
 ```python
 from iziproxy import IziProxy
 
 local = IziProxy().start_local_proxy()   # http://127.0.0.1:3128
-print("Proxy local :", local.url)
+print("Proxy local :", local.address)
 local.serve_forever()                    # Ctrl+C pour arrêter
 ```
 
@@ -166,17 +210,9 @@ local.serve_forever()                    # Ctrl+C pour arrêter
   encore lancé, seconde instance), `start_local_proxy()` lève `OSError`.
 - **Jeton** : le proxy local exige un jeton (voir [Sécurité](#sécurité)),
   inclus dans `local.url` : `http://iziproxy:<jeton>@127.0.0.1:3128`. Il est
-  aléatoire à chaque démarrage ; pour configurer vos outils une fois pour
-  toutes, fixez-le : `start_local_proxy(token="un-jeton-long-et-secret")`.
+  aléatoire à chaque démarrage, sauf si vous le fixez :
+  `start_local_proxy(token="un-jeton-long-et-secret")`.
 
-Configurez ensuite les outils avec `local.url`, par exemple :
-
-```bash
-git config --global http.proxy http://iziproxy:un-jeton-long-et-secret@127.0.0.1:3128
-export HTTPS_PROXY=http://iziproxy:un-jeton-long-et-secret@127.0.0.1:3128
-```
-
-(PowerShell : `$env:HTTPS_PROXY = "http://iziproxy:…@127.0.0.1:3128"`.)
 Script complet : [`examples/local_proxy.py`](examples/local_proxy.py).
 
 Depuis un programme Python, le proxy peut aussi ne vivre que le temps d'un
@@ -225,6 +261,8 @@ Une variable que vous avez déjà définie n'est jamais remplacée ;
 `uninstall()` restaure exactement les valeurs d'avant ; `install(tls_env=False)`
 désactive le tout. Si l'export échoue, un avertissement est journalisé et
 le reste de l'installation se fait normalement.
+
+`iziproxy setup` écrit ces réglages dans la configuration de git et de curl.
 
 curl (schannel) n'a pas de variable d'environnement pour la révocation :
 ajoutez `--ssl-revoke-best-effort` (ou la ligne `ssl-revoke-best-effort`
