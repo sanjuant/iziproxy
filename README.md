@@ -165,8 +165,8 @@ outil sur l'URL du proxy local `http://iziproxy:<jeton>@127.0.0.1:3128` :
 
 | Outil | Fichier | Réglages |
 |---|---|---|
-| git | configuration globale (`~/.gitconfig`) | `http.proxy`, `https.proxy` ; sous Windows `http.schannelCheckRevoke best-effort` |
-| curl | `%APPDATA%\_curlrc` (Windows), `~/.curlrc` | `proxy` ; sous Windows `ssl-revoke-best-effort` |
+| git | configuration globale (`~/.gitconfig`) | `http.proxy`, `https.proxy`, `http.proxyAuthMethod basic` ; sous Windows `http.schannelCheckRevoke best-effort` |
+| curl | le fichier que curl lit (`$CURL_HOME`, `$XDG_CONFIG_HOME`, `$HOME`, puis sous Windows `%USERPROFILE%`, `%APPDATA%`) ; à défaut `%APPDATA%\_curlrc` (Windows), `~/.curlrc` | `proxy` ; sous Windows `ssl-revoke-best-effort` ; retire `proxy-user` / `-U`, `proxy-ntlm`, `proxy-negotiate`, `proxy-anyauth`, `proxy-digest`, `proxy-basic` |
 | pip | `%APPDATA%\pip\pip.ini` (Windows), `~/.config/pip/pip.conf` | `proxy`, `cert` (export PEM du magasin de certificats du système) |
 
 - **Aucun mot de passe écrit** : seul le jeton du proxy local figure dans ces

@@ -1,8 +1,9 @@
 """
 Tests de la commande ``iziproxy`` (serve, setup, setup --undo).
 
-Aucune configuration réelle n'est touchée : HOME, APPDATA, XDG_CONFIG_HOME
-et la configuration globale de git pointent vers des répertoires temporaires.
+Aucune configuration réelle n'est touchée : HOME, USERPROFILE (conftest),
+APPDATA, XDG_CONFIG_HOME et la configuration globale de git pointent vers des
+répertoires temporaires (CURL_HOME est retiré).
 """
 
 import os
@@ -25,16 +26,20 @@ def user_dirs(monkeypatch, tmp_path):
     """Répertoires de l'utilisateur et configuration git temporaires."""
     appdata = tmp_path / "appdata"
     xdg = tmp_path / "xdg"
-    appdata.mkdir()
-    xdg.mkdir()
+    home = tmp_path / "home"
+    for directory in (appdata, xdg):
+        directory.mkdir()
     monkeypatch.setenv("APPDATA", str(appdata))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    # HOME et USERPROFILE : tmp_path/home (conftest) ; recherche du .curlrc
+    # comme curl sans aucun fichier réel de l'utilisateur
+    monkeypatch.delenv("CURL_HOME", raising=False)
     gitconfig = tmp_path / "gitconfig"
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     # Export du magasin du système : rapide et déterministe dans les tests
     monkeypatch.setattr(tool_setup, "export_ca_bundle", _fake_export)
-    return {"appdata": appdata, "xdg": xdg, "gitconfig": gitconfig}
+    return {"appdata": appdata, "xdg": xdg, "home": home, "gitconfig": gitconfig}
 
 
 def _fake_export(path):
@@ -86,12 +91,16 @@ def test_invalid_token_file_rejected():
         tool_setup.load_token()
 
 
-def test_config_dir_per_platform(user_dirs):
+def test_config_dir_per_platform(user_dirs, monkeypatch):
     assert tool_setup.config_dir(windows=True) == os.path.join(str(user_dirs["appdata"]), "iziproxy")
-    assert tool_setup.curlrc_path(windows=True) == os.path.join(str(user_dirs["appdata"]), "_curlrc")
     assert tool_setup.pip_config_path(windows=True) == os.path.join(str(user_dirs["appdata"]), "pip", "pip.ini")
-    assert tool_setup.curlrc_path(windows=False) == os.path.join(os.path.expanduser("~"), ".curlrc")
     assert tool_setup.pip_config_path(windows=False) == os.path.join(str(user_dirs["xdg"]), "pip", "pip.conf")
+    # Aucun .curlrc : emplacement par défaut (.curlrc sous Windows quand
+    # XDG_CONFIG_HOME est défini, curl récent ne cherchant plus _curlrc)
+    assert tool_setup.curlrc_path(windows=True) == os.path.join(str(user_dirs["appdata"]), ".curlrc")
+    assert tool_setup.curlrc_path(windows=False) == os.path.join(str(user_dirs["home"]), ".curlrc")
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert tool_setup.curlrc_path(windows=True) == os.path.join(str(user_dirs["appdata"]), "_curlrc")
 
 
 # ---------------------------------------------------------------------- #
@@ -106,6 +115,27 @@ def test_update_curlrc_replaces_proxy_and_keeps_the_rest():
     assert 'proxy = "http://iziproxy:tok@127.0.0.1:3128"\n' in updated
     # Idempotent : un second setup ne duplique pas le bloc
     assert update_curlrc(updated, "http://iziproxy:tok@127.0.0.1:3128", True) == updated
+
+
+def test_update_curlrc_removes_proxy_authentication():
+    original = ('-U DOMAIN\\user:secret\nproxy-user = "u:p"\n--proxy-ntlm\nproxy-negotiate\n'
+                'proxy-anyauth\n--proxy-digest\nproxy-basic\n-u site:pass\n-X POST\nuser-agent = x\n')
+    assert tool_setup.curl_proxy_auth_options(original) == [
+        "-U", "proxy-user", "proxy-ntlm", "proxy-negotiate", "proxy-anyauth", "proxy-digest", "proxy-basic"]
+    updated = update_curlrc(original, "http://p", False)
+    assert "secret" not in updated and "u:p" not in updated
+    for option in ("proxy-ntlm", "proxy-negotiate", "proxy-anyauth", "proxy-digest", "proxy-basic"):
+        assert option not in updated
+    # Options courtes sensibles à la casse : -u (site) et -X (méthode) restent
+    assert "-u site:pass\n" in updated and "-X POST\n" in updated and "user-agent = x\n" in updated
+    assert tool_setup.curl_proxy_auth_options(updated) == []
+
+
+def test_plan_reports_removed_curl_options_without_values():
+    _write(tool_setup.curlrc_path(), "proxy-user = DOMAIN\\me:S3cret\nproxy-ntlm\n")
+    change = tool_setup.plan(tools=("curl",), token="t" * 20)[0][0]
+    assert "removed (proxy authentication): proxy-user, proxy-ntlm" in change.summary
+    assert not any("S3cret" in line for line in change.summary)
 
 
 def test_update_curlrc_without_revoke_keeps_existing_option():
@@ -138,9 +168,66 @@ def test_plan_windows_specific_settings():
 @needs_git
 def test_plan_git_keys_per_platform():
     keys = [c.target for c in tool_setup.plan(tools=("git",), token="t" * 20, windows=True)[0]]
-    assert keys == ["http.proxy", "https.proxy", "http.schannelCheckRevoke"]
+    assert keys == ["http.proxy", "https.proxy", "http.proxyAuthMethod", "http.schannelCheckRevoke"]
     keys = [c.target for c in tool_setup.plan(tools=("git",), token="t" * 20, windows=False)[0]]
-    assert keys == ["http.proxy", "https.proxy"]
+    assert keys == ["http.proxy", "https.proxy", "http.proxyAuthMethod"]
+
+
+# ---------------------------------------------------------------------- #
+# Recherche du .curlrc (ordre de curl)
+# ---------------------------------------------------------------------- #
+def test_curlrc_candidates_windows_order(user_dirs, monkeypatch, tmp_path):
+    curl_home = str(tmp_path / "curlhome")
+    profile = str(tmp_path / "profile")
+    monkeypatch.setenv("CURL_HOME", curl_home)
+    monkeypatch.setenv("USERPROFILE", profile)
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    home, appdata = str(user_dirs["home"]), str(user_dirs["appdata"])
+    assert tool_setup.curlrc_candidates(windows=True) == [
+        os.path.join(curl_home, ".curlrc"), os.path.join(curl_home, "_curlrc"),
+        os.path.join(home, ".curlrc"), os.path.join(home, "_curlrc"),
+        os.path.join(profile, ".curlrc"), os.path.join(profile, "_curlrc"),
+        os.path.join(appdata, ".curlrc"), os.path.join(appdata, "_curlrc"),
+        os.path.join(profile, "Application Data", ".curlrc"), os.path.join(profile, "Application Data", "_curlrc"),
+        os.path.join(curl_home, ".config", "curlrc"),
+    ]
+
+
+def test_curlrc_candidates_with_xdg(user_dirs, monkeypatch):
+    xdg, home, appdata = str(user_dirs["xdg"]), str(user_dirs["home"]), str(user_dirs["appdata"])
+    # Après $XDG_CONFIG_HOME/curlrc, curl ne cherche plus que .curlrc
+    assert tool_setup.curlrc_candidates(windows=True) == [
+        os.path.join(xdg, "curlrc"), os.path.join(home, ".curlrc"), os.path.join(appdata, ".curlrc"),
+        os.path.join(home, "Application Data", ".curlrc")]
+    assert tool_setup.curlrc_candidates(windows=False) == [os.path.join(xdg, "curlrc"), os.path.join(home, ".curlrc")]
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert tool_setup.curlrc_candidates(windows=False) == [
+        os.path.join(home, ".curlrc"), os.path.join(home, ".config", "curlrc")]
+
+
+@pytest.mark.parametrize("existing", ["curlhome/.curlrc", "home/_curlrc", "appdata/.curlrc", "home/.config/curlrc"])
+def test_curlrc_path_is_the_first_file_curl_reads(monkeypatch, tmp_path, existing):
+    monkeypatch.setenv("CURL_HOME", str(tmp_path / "curlhome"))
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    appdata_curlrc = str(tmp_path / "appdata" / "_curlrc")
+    _write(appdata_curlrc, "verbose\n")
+    path = str(tmp_path / existing)
+    _write(path, "verbose\n")
+    # ~/.config/curlrc vient après %APPDATA%\_curlrc
+    expected = appdata_curlrc if existing == "home/.config/curlrc" else path
+    assert os.path.normpath(tool_setup.curlrc_path(windows=True)) == os.path.normpath(expected)
+
+
+def test_setup_edits_the_curlrc_curl_reads_and_undo_restores_it(user_dirs):
+    curlrc = os.path.join(str(user_dirs["home"]), ".curlrc")
+    _write(curlrc, "proxy-user = me:pass\nretry = 3\n")
+    assert cli.main(["setup", "--yes", "--only", "curl"]) == 0
+    assert "127.0.0.1:3128" in _read(curlrc)
+    assert "me:pass" not in _read(curlrc)
+    assert not os.path.exists(os.path.join(str(user_dirs["appdata"]), "_curlrc"))
+    assert not os.path.exists(os.path.join(str(user_dirs["appdata"]), ".curlrc"))
+    assert cli.main(["setup", "--undo"]) == 0
+    assert _read(curlrc) == "proxy-user = me:pass\nretry = 3\n"
 
 
 def test_plan_rejects_unknown_tool():
@@ -164,6 +251,7 @@ def test_setup_writes_everything_and_undo_restores(capsys):
     pipconf = tool_setup.pip_config_path()
     _write(curlrc, "retry = 3\nproxy = http://old:3128\n")
     subprocess.run(["git", "config", "--global", "http.proxy", "http://previous:8080"], check=True)
+    subprocess.run(["git", "config", "--global", "http.proxyAuthMethod", "ntlm"], check=True)
 
     assert cli.main(["setup", "--yes"]) == 0
     out = capsys.readouterr().out
@@ -174,6 +262,7 @@ def test_setup_writes_everything_and_undo_restores(capsys):
 
     assert _git_get("http.proxy") == url
     assert _git_get("https.proxy") == url
+    assert _git_get("http.proxyAuthMethod") == "basic"
     assert _git_get("http.schannelCheckRevoke") == ("best-effort" if WINDOWS else None)
     assert f'proxy = "{url}"' in _read(curlrc)
     assert "retry = 3" in _read(curlrc)
@@ -187,6 +276,7 @@ def test_setup_writes_everything_and_undo_restores(capsys):
     assert cli.main(["setup", "--undo"]) == 0
     assert _git_get("http.proxy") == "http://previous:8080"
     assert _git_get("https.proxy") is None
+    assert _git_get("http.proxyAuthMethod") == "ntlm"
     assert _git_get("http.schannelCheckRevoke") is None
     assert _read(curlrc) == "retry = 3\nproxy = http://old:3128\n"
     assert not os.path.exists(pipconf)
