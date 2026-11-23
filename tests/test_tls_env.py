@@ -300,3 +300,83 @@ def test_nothing_without_proxy(windows_store):
     assert not installation.active
     assert IziProxy().set_environment_variables() == {}
     assert snapshot() == before
+
+
+# ---------------------------------------------------------------------- #
+# requests du processus : les variables d'IziProxy ne s'appliquent pas
+# ---------------------------------------------------------------------- #
+def session_verify(session, verify=None, url="https://example.com/"):
+    """verify que requests utiliserait pour une requête de la session."""
+    return session.merge_environment_settings(url, {}, False, verify, None)["verify"]
+
+
+def test_own_ca_variables_reach_subprocesses_not_in_process_requests(windows_store, make_proxy):
+    import requests
+
+    proxy = make_proxy()
+    izi = IziProxy(proxy_url=proxy.url)
+    izi.set_environment_variables()
+    bundle = tls_env.system_ca_bundle()
+    assert os.environ["REQUESTS_CA_BUNDLE"] == os.environ["CURL_CA_BUNDLE"] == bundle
+
+    session = izi.create_session()
+    # Magasin du système en direct (truststore), pas l'export d'un jour
+    assert session_verify(session) is True
+    assert session_verify(session, verify=True) is True
+    # Choix explicites conservés
+    assert session_verify(session, verify="/explicit.pem") == "/explicit.pem"
+    assert session_verify(session, verify=False) is False
+    session.verify = "/session.pem"
+    assert session_verify(session) == "/session.pem"
+    # Une session non configurée par IziProxy lit toujours l'environnement
+    assert session_verify(requests.Session()) == bundle
+    # trust_env=False : rien à corriger
+    session.trust_env = False
+    assert session_verify(session) == "/session.pem"
+    izi.clear_environment_variables()
+
+
+@pytest.mark.parametrize("kind", ["file", "dir"])
+def test_explicit_verify_path_still_applies_in_process(windows_store, make_proxy, tmp_path, kind):
+    proxy = make_proxy()
+    if kind == "file":
+        ca = tmp_path / "ca.pem"
+        ca.write_text("placeholder", encoding="ascii")
+    else:
+        ca = tmp_path / "certs"
+        ca.mkdir()
+    izi = IziProxy(proxy_url=proxy.url, verify=str(ca))
+    izi.set_environment_variables()
+    assert os.environ["REQUESTS_CA_BUNDLE"] == str(ca)
+    # Choix explicite de l'utilisateur : requests le lit comme sans IziProxy
+    assert izi.create_session().merge_environment_settings(
+        "https://example.com/", {}, False, None, None)["verify"] == str(ca)
+    izi.clear_environment_variables()
+
+
+@pytest.mark.parametrize("name", ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"])
+def test_user_ca_variable_still_applies_in_process(windows_store, make_proxy, monkeypatch, name):
+    proxy = make_proxy()
+    monkeypatch.setenv(name, "/user/ca.pem")
+    izi = IziProxy(proxy_url=proxy.url)
+    izi.set_environment_variables()
+    # CURL_CA_BUNDLE seul : IziProxy définit REQUESTS_CA_BUNDLE, lu en
+    # premier par requests ; la valeur de l'utilisateur reste celle utilisée
+    assert session_verify(izi.create_session()) == "/user/ca.pem"
+    izi.clear_environment_variables()
+
+
+def test_value_changed_after_install_is_honoured(windows_store, make_proxy, monkeypatch):
+    import requests
+
+    proxy = make_proxy()
+    iziproxy.install(proxy_url=proxy.url)
+    session = requests.Session()  # configurée par patch_requests()
+    assert session_verify(session) is True
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/later.pem")
+    assert session_verify(session) == "/later.pem"
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE")
+    iziproxy.uninstall()
+    # Après uninstall, plus aucune correction : l'environnement fait foi
+    monkeypatch.setenv("CURL_CA_BUNDLE", "/after.pem")
+    assert session_verify(session) == "/after.pem"

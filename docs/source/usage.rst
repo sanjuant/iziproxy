@@ -85,10 +85,20 @@ IziProxy ne peut pas modifier l'environnement d'un terminal déjà ouvert :
 **utilisateur** de chaque outil, après avoir affiché ce qu'il va écrire et
 demandé confirmation :
 
-* **git** : configuration globale, ``http.proxy`` et ``https.proxy`` ; sous
-  Windows, ``http.schannelCheckRevoke best-effort`` (voir plus bas) ;
-* **curl** : ``proxy`` dans ``%APPDATA%\_curlrc`` (Windows) ou
-  ``~/.curlrc`` ; sous Windows, ``ssl-revoke-best-effort`` ;
+* **git** : configuration globale, ``http.proxy`` et ``https.proxy``,
+  ``http.proxyAuthMethod basic`` (une méthode NTLM ou Negotiate réglée pour
+  l'ancien proxy serait refusée par le proxy local) ; sous Windows,
+  ``http.schannelCheckRevoke best-effort`` (voir plus bas) ;
+* **curl** : ``proxy`` dans le fichier que curl lit réellement, cherché dans
+  le même ordre que curl : ``$CURL_HOME``, ``$XDG_CONFIG_HOME/curlrc``,
+  ``$HOME``, puis sous Windows ``%USERPROFILE%`` et ``%APPDATA%``
+  (``.curlrc`` avant ``_curlrc``), enfin ``~/.config/curlrc`` ; à défaut,
+  ``%APPDATA%\_curlrc`` (Windows) ou ``~/.curlrc`` est créé. Sous Windows,
+  ``ssl-revoke-best-effort`` est ajouté. Les options d'authentification
+  auprès d'un proxy (``proxy-user`` / ``-U``, ``proxy-ntlm``,
+  ``proxy-negotiate``, ``proxy-anyauth``, ``proxy-digest``, ``proxy-basic``)
+  sont retirées : curl enverrait sinon d'autres identifiants au proxy local
+  (``407``). ``--undo`` les rétablit ;
 * **pip** : ``proxy`` et ``cert`` dans ``%APPDATA%\pip\pip.ini`` (Windows)
   ou ``~/.config/pip/pip.conf``. ``cert`` désigne un export PEM des autorités
   de certifi et du magasin du système (autorité interne d'un proxy qui
@@ -203,6 +213,15 @@ vérifie lui-même le certificat du site.
     ``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_n`` / ``GIT_CONFIG_VALUE_n``,
     ajoutées à la suite de celles déjà définies, sans toucher au
     ``.gitconfig`` ; la vérification reste active quand la liste répond.
+
+  Ces variables visent les sous-processus : dans le processus lui-même,
+  les sessions ``requests`` configurées par IziProxy (``create_session()``,
+  ``patch_requests()``, ``install()``) ignorent les ``REQUESTS_CA_BUNDLE`` /
+  ``CURL_CA_BUNDLE`` qui pointent vers l'export du magasin écrit par
+  IziProxy et vérifient avec le magasin du système en direct (truststore)
+  plutôt qu'avec cet export, qui peut dater d'un jour. Seul l'export est
+  ignoré : un fichier ou répertoire passé par ``verify="/chemin"``, ou une
+  valeur que vous aviez définie avant, reste appliqué.
 
   Une variable déjà définie n'est jamais remplacée,
   ``clear_environment_variables()`` et ``uninstall()`` restaurent exactement

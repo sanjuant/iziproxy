@@ -165,8 +165,8 @@ outil sur l'URL du proxy local `http://iziproxy:<jeton>@127.0.0.1:3128` :
 
 | Outil | Fichier | Réglages |
 |---|---|---|
-| git | configuration globale (`~/.gitconfig`) | `http.proxy`, `https.proxy` ; sous Windows `http.schannelCheckRevoke best-effort` |
-| curl | `%APPDATA%\_curlrc` (Windows), `~/.curlrc` | `proxy` ; sous Windows `ssl-revoke-best-effort` |
+| git | configuration globale (`~/.gitconfig`) | `http.proxy`, `https.proxy`, `http.proxyAuthMethod basic` ; sous Windows `http.schannelCheckRevoke best-effort` |
+| curl | le fichier que curl lit (`$CURL_HOME`, `$XDG_CONFIG_HOME`, `$HOME`, puis sous Windows `%USERPROFILE%`, `%APPDATA%`) ; à défaut `%APPDATA%\_curlrc` (Windows), `~/.curlrc` | `proxy` ; sous Windows `ssl-revoke-best-effort` ; retire `proxy-user` / `-U`, `proxy-ntlm`, `proxy-negotiate`, `proxy-anyauth`, `proxy-digest`, `proxy-basic` |
 | pip | `%APPDATA%\pip\pip.ini` (Windows), `~/.config/pip/pip.conf` | `proxy`, `cert` (export PEM du magasin de certificats du système) |
 
 - **Aucun mot de passe écrit** : seul le jeton du proxy local figure dans ces
@@ -256,6 +256,13 @@ outils lancés par `subprocess` en tiennent compte **sans rien faire** :
   `http.schannelCheckRevoke=best-effort` par `GIT_CONFIG_COUNT` /
   `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, sans toucher à votre
   `.gitconfig`. La vérification reste active quand la liste répond.
+
+Ces variables visent les sous-processus : dans votre programme, les
+sessions `requests` configurées par IziProxy continuent de vérifier les
+certificats avec le magasin du système en direct (truststore), sans l'export
+PEM du magasin. Seul cet export est ignoré : un fichier ou répertoire passé
+par `verify="/chemin"`, ou une valeur de `REQUESTS_CA_BUNDLE` ou
+`CURL_CA_BUNDLE` que vous aviez définie, reste appliqué.
 
 Une variable que vous avez déjà définie n'est jamais remplacée ;
 `uninstall()` restaure exactement les valeurs d'avant ; `install(tls_env=False)`

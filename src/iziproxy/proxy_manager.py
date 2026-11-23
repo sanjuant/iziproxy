@@ -6,10 +6,12 @@ authentification et intégration avec requests.
 import os
 import threading
 import time
+import types
 from collections import ChainMap
 from urllib.parse import urlsplit
 
 import requests
+from requests.sessions import merge_setting
 
 from .adapters import IziProxyAdapter
 from .config_manager import ConfigManager
@@ -44,6 +46,9 @@ DEFAULT_TARGET_URL = "https://www.example.com/"
 
 _PROXY_ENV_VARS = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")
 
+# Variables d'autorités que requests lit (trust_env), dans son ordre
+_REQUESTS_CA_VARS = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+
 # Délai avant de sonder de nouveau un proxy resté sans réponse (secondes)
 AUTH_PROBE_RETRY_DELAY = 10.0
 
@@ -54,6 +59,27 @@ _AUTH_TYPES = {"basic": "basic", "ntlm": "ntlm", "negotiate": "ntlm"}
 # Patch de requests actif (un seul à la fois pour tout le processus)
 _PATCH_LOCK = threading.Lock()
 _ACTIVE_PATCH = {"owner": None, "original_init": None}
+
+
+def _session_environment(session, url, proxies, stream, verify, cert):
+    """
+    Session.merge_environment_settings d'une session configurée par IziProxy.
+
+    Avec trust_env, requests prend REQUESTS_CA_BUNDLE ou CURL_CA_BUNDLE comme
+    autorités de chaque requête. Celles qu'IziProxy écrit pour les
+    sous-processus (export PEM du magasin, jusqu'à un jour d'âge) remplaceraient
+    alors, dans le processus lui-même, la vérification par le magasin du
+    système en direct (truststore). requests reçoit donc ce qu'il aurait lu
+    sans elles : la valeur d'origine de l'utilisateur, sinon verify de la
+    requête ou de la session.
+    """
+    settings = type(session).merge_environment_settings(session, url, proxies, stream, verify, cert)
+    izi = getattr(session, "iziproxy", None)
+    if izi is not None and session.trust_env and (verify is True or verify is None):
+        original = izi._requests_ca_bundle()
+        if original is not None:
+            settings["verify"] = merge_setting(original[0] or verify, session.verify)
+    return settings
 
 
 def _normalize_auth_type(value):
@@ -162,6 +188,8 @@ class IziProxy:
         self._saved_env = None
         # Valeurs d'origine des variables TLS remplacées : {nom: valeur|None}
         self._saved_tls_env = None
+        # Variables TLS définies par IziProxy pour les sous-processus
+        self._tls_env_values = {}
         self._env_local_proxy = None
         # Proxys locaux partagés par les adaptateurs : {avec_jeton: LocalProxy}
         self._shared_local_proxies = {}
@@ -646,6 +674,9 @@ class IziProxy:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         session.iziproxy = self
+        # Les variables d'autorités écrites pour les sous-processus ne
+        # s'appliquent pas aux requêtes de la session (voir _session_environment)
+        session.merge_environment_settings = types.MethodType(_session_environment, session)
         return session
 
     def create_session(self):
@@ -983,6 +1014,7 @@ class IziProxy:
             values = tls_environment(self.verify, ChainMap(saved, os.environ))
             for name in values:
                 saved.setdefault(name, os.environ.get(name))
+        self._tls_env_values = dict(values)
         for name, original in saved.items():
             value = values.get(name, original)
             if value is None:
@@ -990,6 +1022,31 @@ class IziProxy:
             else:
                 os.environ[name] = value
         return values
+
+    def _requests_ca_bundle(self):
+        """
+        Autorités que requests prendrait dans l'environnement sans l'export
+        du magasin du système écrit par IziProxy.
+
+        Seul cet export (jusqu'à un jour d'âge) est écarté au profit de
+        truststore ; un fichier ou répertoire choisi par l'utilisateur
+        (``verify="/chemin"``) reste appliqué, comme sans IziProxy.
+
+        Returns:
+            tuple|None: None si requests lit une valeur qui n'est pas l'export
+            d'IziProxy (ou aucune) ; sinon (valeur,) avec la valeur d'origine
+            de REQUESTS_CA_BUNDLE ou CURL_CA_BUNDLE, None s'il n'y en avait pas
+        """
+        own = self._tls_env_values
+        if not own:
+            return None
+        name = next((name for name in _REQUESTS_CA_VARS if os.environ.get(name)), None)
+        if name is None or own.get(name) != os.environ[name]:
+            return None
+        if isinstance(self.verify, str) and own[name] == self.verify:
+            return None
+        saved = self._saved_tls_env or {}
+        return (next((saved[name] for name in _REQUESTS_CA_VARS if saved.get(name)), None),)
 
     def _local_proxy_env(self):
         """Variables pointant vers le proxy local (démarré si nécessaire)."""
@@ -1030,6 +1087,7 @@ class IziProxy:
         if local is not None:
             local.stop()
         saved_tls, self._saved_tls_env = self._saved_tls_env, None
+        self._tls_env_values = {}
         for name, value in (saved_tls or {}).items():
             if value is None:
                 os.environ.pop(name, None)

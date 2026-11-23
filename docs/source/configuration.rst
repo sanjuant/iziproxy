@@ -121,7 +121,11 @@ Ils écrivent aussi, pour les sous-processus, les variables TLS absentes :
 et, sous Windows, ``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_n`` /
 ``GIT_CONFIG_VALUE_n`` pour ``http.schannelCheckRevoke=best-effort``. Une
 valeur déjà définie est conservée ; ``tls_env=False`` les désactive (voir
-:doc:`usage`, « Erreurs TLS des outils »).
+:doc:`usage`, « Erreurs TLS des outils »). Les sessions ``requests``
+configurées par IziProxy n'appliquent pas à leurs propres requêtes les
+``REQUESTS_CA_BUNDLE`` / ``CURL_CA_BUNDLE`` qui pointent vers l'export du
+magasin du système : elles gardent ce magasin en direct (truststore). Un
+fichier ou répertoire passé par ``verify`` reste appliqué.
 
 Certificats : proxy https:// et fichier PAC
 -------------------------------------------

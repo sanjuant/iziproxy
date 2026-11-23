@@ -6,10 +6,12 @@ que git, curl et pip passent par le proxy local lancé avec ``iziproxy serve``,
 leur configuration utilisateur reçoit une fois pour toutes l'URL du proxy
 local, jeton compris :
 
-- git : ``http.proxy`` / ``https.proxy`` en configuration globale (et, sous
-  Windows, ``http.schannelCheckRevoke=best-effort``) ;
-- curl : ``proxy`` (et ``ssl-revoke-best-effort`` sous Windows) dans
-  ``%APPDATA%\\_curlrc`` ou ``~/.curlrc`` ;
+- git : ``http.proxy`` / ``https.proxy`` et ``http.proxyAuthMethod=basic``
+  en configuration globale (et, sous Windows,
+  ``http.schannelCheckRevoke=best-effort``) ;
+- curl : ``proxy`` (et ``ssl-revoke-best-effort`` sous Windows) dans le
+  ``.curlrc`` que curl lit (voir curlrc_path()), sans les options
+  d'authentification auprès d'un proxy (``proxy-user``, ``proxy-ntlm``...) ;
 - pip : ``proxy`` et ``cert`` (export PEM du magasin du système) dans
   ``%APPDATA%\\pip\\pip.ini`` ou ``~/.config/pip/pip.conf``.
 
@@ -41,10 +43,20 @@ UNDO_COPY_SUFFIX = ".iziproxy-undo.bak"
 GIT_PROXY_KEYS = ("http.proxy", "https.proxy")
 GIT_REVOKE_KEY = "http.schannelCheckRevoke"
 GIT_REVOKE_VALUE = "best-effort"
+# Une méthode NTLM / Negotiate laissée là ferait refuser git par le proxy
+# local (407) : seul Basic porte son jeton
+GIT_AUTH_KEY = "http.proxyAuthMethod"
+GIT_AUTH_VALUE = "basic"
 
 _MARKER = "# Added by 'iziproxy setup' (undo: iziproxy setup --undo)"
-# Clés curl remplacées par setup (« x » : option courte -x de --proxy)
-_CURL_PROXY_KEYS = {"proxy", "x"}
+# Clés curl remplacées par setup (options courtes avec leur tiret : la casse
+# compte, -x est --proxy mais -X la méthode HTTP)
+_CURL_PROXY_KEYS = {"proxy", "-x"}
+# Authentification auprès du proxy : laissées en place, ces options feraient
+# envoyer à curl d'autres identifiants (NTLM...) au proxy local, qui
+# répondrait 407. Retirées par setup, rétablies par undo (fichier d'origine)
+_CURL_PROXY_AUTH_KEYS = {"proxy-user", "-U", "proxy-ntlm", "proxy-negotiate", "proxy-anyauth",
+                         "proxy-digest", "proxy-basic"}
 _CURL_REVOKE_KEY = "ssl-revoke-best-effort"
 _INI_SECTION_RE = re.compile(r"^\s*\[([^\]]*)\]\s*$")
 
@@ -79,11 +91,71 @@ def config_dir(windows=None):
     return os.path.join(base, "iziproxy")
 
 
+def curlrc_candidates(windows=None):
+    """
+    Fichiers de configuration de curl, dans l'ordre où curl les cherche.
+
+    Reproduit findfile() de curl (src/tool_findfile.c, curl 8 récent) :
+    ``$CURL_HOME``, ``$XDG_CONFIG_HOME`` (fichier ``curlrc``, sans point),
+    ``$HOME`` puis, sous Windows, ``%USERPROFILE%``, ``%APPDATA%`` et
+    ``%USERPROFILE%\\Application Data`` ; enfin ``$CURL_HOME/.config/curlrc``
+    ou ``$HOME/.config/curlrc`` si XDG_CONFIG_HOME n'est pas défini. Sous
+    Windows, chaque répertoire est essayé avec ``.curlrc`` puis ``_curlrc``,
+    sauf une fois un fichier ``curlrc`` (sans point) cherché : curl ne
+    regarde plus alors que ``.curlrc``. Hors Windows, le répertoire personnel
+    du compte (getpwuid) vient en dernier.
+
+    Les curl 8 plus anciens (8.9, celui de Windows 11) cherchent
+    ``.curlrc`` / ``_curlrc`` dans ``$XDG_CONFIG_HOME`` : l'ordre ne diffère
+    que si XDG_CONFIG_HOME est défini.
+
+    Returns:
+        list[str]: Chemins, le premier existant étant celui que curl lit
+    """
+    windows = _is_windows(windows)
+    places = [("CURL_HOME", None, False), ("XDG_CONFIG_HOME", None, True), ("HOME", None, False)]
+    if windows:
+        places += [("USERPROFILE", None, False), ("APPDATA", None, False),
+                   ("USERPROFILE", "Application Data", False)]
+    places += [("CURL_HOME", ".config", True), ("HOME", ".config", True)]
+    # dotscore de curl : essayer aussi _curlrc (Windows), jusqu'au premier « curlrc »
+    dotscore = True
+    paths = []
+    for variable, subdir, without_dot in places:
+        home = os.environ.get(variable)
+        if not home:
+            continue
+        if subdir:
+            home = os.path.join(home, subdir)
+        if without_dot:
+            if not dotscore:
+                continue
+            names = ["curlrc"]
+            dotscore = False
+        else:
+            names = [".curlrc", "_curlrc"] if windows and dotscore else [".curlrc"]
+        paths += [os.path.join(home, name) for name in names]
+    if not windows:
+        paths.append(os.path.join(os.path.expanduser("~"), ".curlrc"))
+    return list(dict.fromkeys(paths))
+
+
 def curlrc_path(windows=None):
-    """Fichier de configuration de curl : ``%APPDATA%\\_curlrc`` ou ``~/.curlrc``."""
-    if _is_windows(windows):
-        return os.path.join(_appdata(), "_curlrc")
-    return os.path.join(os.path.expanduser("~"), ".curlrc")
+    """
+    Fichier de configuration que curl lit : le premier existant de
+    curlrc_candidates().
+
+    S'il n'y en a aucun : ``~/.curlrc`` (Linux, macOS), ``%APPDATA%\\_curlrc``
+    (Windows) ou ``%APPDATA%\\.curlrc`` si XDG_CONFIG_HOME est défini (curl
+    récent ne cherche plus alors ``_curlrc``).
+    """
+    windows = _is_windows(windows)
+    for path in curlrc_candidates(windows):
+        if os.path.isfile(path):
+            return path
+    if not windows:
+        return os.path.join(os.path.expanduser("~"), ".curlrc")
+    return os.path.join(_appdata(), ".curlrc" if os.environ.get("XDG_CONFIG_HOME") else "_curlrc")
 
 
 def pip_config_path(windows=None):
@@ -230,21 +302,37 @@ def _git_unset(key):
 # Édition des fichiers de configuration
 # ---------------------------------------------------------------------- #
 def _curl_key(line):
-    """Nom de l'option d'une ligne de .curlrc (sans tirets), None pour un commentaire."""
+    """
+    Option d'une ligne de .curlrc, None pour un commentaire.
+
+    Option longue : son nom sans tirets, en minuscules (``proxy``) ; option
+    courte : avec son tiret et sa casse (``-x``, ``-U``).
+    """
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return None
+    if stripped.startswith("-") and not stripped.startswith("--"):
+        return stripped[:2]
     return re.split(r"[\s=:]", stripped.lstrip("-"), maxsplit=1)[0].lower()
+
+
+def curl_proxy_auth_options(text):
+    """Options d'authentification auprès du proxy présentes dans text (retirées par setup)."""
+    keys = (_curl_key(line) for line in _lines_with_end(text))
+    return list(dict.fromkeys(key for key in keys if key in _CURL_PROXY_AUTH_KEYS))
 
 
 def update_curlrc(text, proxy_url, revoke_best_effort):
     """
     Contenu de .curlrc avec le proxy local.
 
-    Les options ``proxy`` / ``-x`` existantes (et ``ssl-revoke-best-effort``
-    si on l'ajoute) sont retirées, le reste est conservé tel quel.
+    Les options ``proxy`` / ``-x`` existantes, celles d'authentification
+    auprès du proxy (``proxy-user`` / ``-U``, ``proxy-ntlm``,
+    ``proxy-negotiate``, ``proxy-anyauth``, ``proxy-digest``,
+    ``proxy-basic``) et ``ssl-revoke-best-effort`` si on l'ajoute sont
+    retirées, le reste est conservé tel quel.
     """
-    replaced = set(_CURL_PROXY_KEYS)
+    replaced = _CURL_PROXY_KEYS | _CURL_PROXY_AUTH_KEYS
     settings = [f'proxy = "{proxy_url}"']
     if revoke_best_effort:
         replaced.add(_CURL_REVOKE_KEY)
@@ -333,14 +421,20 @@ def plan(port=DEFAULT_PORT, tools=TOOLS, token=None, windows=None):
         else:
             for key in GIT_PROXY_KEYS:
                 changes.append(Change("git", "git", key, url, [f"{key} = {shown}"]))
+            changes.append(Change("git", "git", GIT_AUTH_KEY, GIT_AUTH_VALUE, [f"{GIT_AUTH_KEY} = {GIT_AUTH_VALUE}"]))
             if windows:
                 changes.append(Change("git", "git", GIT_REVOKE_KEY, GIT_REVOKE_VALUE,
                                       [f"{GIT_REVOKE_KEY} = {GIT_REVOKE_VALUE}"]))
 
     if "curl" in tools:
         path = curlrc_path(windows)
-        content = update_curlrc(_read_text(path), url, windows)
+        original = _read_text(path)
+        content = update_curlrc(original, url, windows)
         summary = [f'proxy = "{shown}"'] + ([_CURL_REVOKE_KEY] if windows else [])
+        removed = curl_proxy_auth_options(original)
+        if removed:
+            # Noms seulement : la valeur de proxy-user est un identifiant
+            summary.append(f"removed (proxy authentication): {', '.join(removed)}")
         changes.append(Change("curl", "file", path, content, summary))
 
     if "pip" in tools:
