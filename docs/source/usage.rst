@@ -214,6 +214,15 @@ vérifie lui-même le certificat du site.
     ajoutées à la suite de celles déjà définies, sans toucher au
     ``.gitconfig`` ; la vérification reste active quand la liste répond.
 
+  Ces variables visent les sous-processus : dans le processus lui-même,
+  les sessions ``requests`` configurées par IziProxy (``create_session()``,
+  ``patch_requests()``, ``install()``) ignorent les ``REQUESTS_CA_BUNDLE`` /
+  ``CURL_CA_BUNDLE`` qui pointent vers l'export du magasin écrit par
+  IziProxy et vérifient avec le magasin du système en direct (truststore)
+  plutôt qu'avec cet export, qui peut dater d'un jour. Seul l'export est
+  ignoré : un fichier ou répertoire passé par ``verify="/chemin"``, ou une
+  valeur que vous aviez définie avant, reste appliqué.
+
   Une variable déjà définie n'est jamais remplacée,
   ``clear_environment_variables()`` et ``uninstall()`` restaurent exactement
   les valeurs d'avant, ``install(tls_env=False)`` (ou

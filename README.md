@@ -257,6 +257,13 @@ outils lancés par `subprocess` en tiennent compte **sans rien faire** :
   `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, sans toucher à votre
   `.gitconfig`. La vérification reste active quand la liste répond.
 
+Ces variables visent les sous-processus : dans votre programme, les
+sessions `requests` configurées par IziProxy continuent de vérifier les
+certificats avec le magasin du système en direct (truststore), sans l'export
+PEM du magasin. Seul cet export est ignoré : un fichier ou répertoire passé
+par `verify="/chemin"`, ou une valeur de `REQUESTS_CA_BUNDLE` ou
+`CURL_CA_BUNDLE` que vous aviez définie, reste appliqué.
+
 Une variable que vous avez déjà définie n'est jamais remplacée ;
 `uninstall()` restaure exactement les valeurs d'avant ; `install(tls_env=False)`
 désactive le tout. Si l'export échoue, un avertissement est journalisé et
